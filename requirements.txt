@@ -1,14 +1,14 @@
-echo flask==3.0.3 > requirements.txt
-echo gunicorn==22.0.0 >> requirements.txt
-echo pandas==2.2.2 >> requirements.txt
-echo numpy==1.26.4 >> requirements.txt
-echo requests==2.32.3 >> requirements.txt
-echo matplotlib==3.9.0 >> requirements.txt
-echo scikit-learn==1.5.0 >> requirements.txt
-echo joblib==1.4.2 >> requirements.txt
-echo tensorflow-cpu==2.16.1 >> requirements.txt
-echo psycopg2-binary==2.9.9 >> requirements.txt
-echo twilio==9.2.3 >> requirements.txt
-echo newsapi-python==0.2.7 >> requirements.txt
-echo werkzeug==3.0.3 >> requirements.txt
-echo python-dotenv==1.0.1 >> requirements.txt
+flask==3.0.3
+gunicorn==22.0.0
+pandas==2.2.2
+numpy==1.26.4
+requests==2.32.3
+matplotlib==3.9.0
+scikit-learn==1.5.0
+joblib==1.4.2
+tensorflow-cpu==2.16.1
+psycopg2-binary==2.9.9
+twilio==9.2.3
+newsapi-python==0.2.7
+werkzeug==3.0.3
+python-dotenv==1.0.1
