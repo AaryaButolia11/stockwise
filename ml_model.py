@@ -1,0 +1,259 @@
+"""
+ml_model.py — LSTM forecast with:
+  • disk-cached models (retrain only once a week)
+  • background training so the first request returns quickly
+  • lightweight inference (<3 s on Fly.io free tier)
+"""
+import os, io, base64, warnings, threading
+from datetime import datetime, timedelta
+
+import numpy as np
+import pandas as pd
+import requests
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import joblib
+
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+
+warnings.filterwarnings("ignore")
+
+# ── Config ─────────────────────────────────────────────────────────────────
+POLYGON_API_KEY   = os.getenv("POLYGON_API_KEY", "Qp0JyguzyDhKjkM3BPpc7HO8LUVdM_a9")
+MODEL_CACHE_DIR   = os.getenv("MODEL_CACHE_DIR", "model_cache")
+MODEL_EXPIRY_DAYS = int(os.getenv("MODEL_EXPIRY_DAYS", "7"))
+LOOKBACK          = 60          # trading days fed into LSTM
+
+os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
+
+# Thread-safe set: symbols currently being trained in background
+_training_lock    = threading.Lock()
+_currently_training: set = set()
+
+
+# ── Cache helpers ───────────────────────────────────────────────────────────
+
+def _paths(symbol: str) -> dict:
+    base = os.path.join(MODEL_CACHE_DIR, symbol.upper())
+    return {
+        "model":  base + "_model.keras",
+        "scaler": base + "_scaler.pkl",
+        "meta":   base + "_meta.txt",
+    }
+
+def _is_fresh(symbol: str) -> bool:
+    p = _paths(symbol)
+    if not all(os.path.exists(v) for v in p.values()):
+        return False
+    try:
+        with open(p["meta"]) as f:
+            age = (datetime.now() - datetime.fromisoformat(f.read().strip())).days
+        return age < MODEL_EXPIRY_DAYS
+    except Exception:
+        return False
+
+def _save(symbol: str, model, scaler):
+    p = _paths(symbol)
+    model.save(p["model"])
+    joblib.dump(scaler, p["scaler"])
+    with open(p["meta"], "w") as f:
+        f.write(datetime.now().isoformat())
+    print(f"[Cache] Saved model for {symbol}")
+
+def _load(symbol: str):
+    p = _paths(symbol)
+    model  = load_model(p["model"])
+    scaler = joblib.load(p["scaler"])
+    print(f"[Cache] Loaded model for {symbol}")
+    return model, scaler
+
+
+# ── Data fetching ───────────────────────────────────────────────────────────
+
+def fetch_polygon_data(symbol: str) -> pd.DataFrame | None:
+    end   = datetime.now()
+    start = end - timedelta(days=365 * 5)
+    url   = (f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day"
+             f"/{start:%Y-%m-%d}/{end:%Y-%m-%d}")
+    res = requests.get(url, params={
+        "adjusted": "true", "sort": "asc",
+        "limit": 5000, "apiKey": POLYGON_API_KEY
+    }, timeout=15)
+    if res.status_code != 200:
+        print(f"Polygon error: {res.text}")
+        return None
+    data = res.json().get("results", [])
+    if not data:
+        return None
+    df = pd.DataFrame(data)
+    df["t"] = pd.to_datetime(df["t"], unit="ms")
+    df.rename(columns={"t": "ds", "c": "y"}, inplace=True)
+    return df[["ds", "y"]].sort_values("ds").reset_index(drop=True)
+
+
+# ── Model architecture ──────────────────────────────────────────────────────
+
+def _build_sequences(scaled: np.ndarray):
+    X, y = [], []
+    for i in range(LOOKBACK, len(scaled)):
+        X.append(scaled[i - LOOKBACK: i, 0])
+        y.append(scaled[i, 0])
+    return np.array(X).reshape(-1, LOOKBACK, 1), np.array(y)
+
+def _build_model() -> Sequential:
+    m = Sequential([
+        LSTM(64, return_sequences=True, input_shape=(LOOKBACK, 1)),
+        Dropout(0.2),
+        LSTM(32),
+        Dropout(0.2),
+        Dense(16, activation="relu"),
+        Dense(1),
+    ])
+    m.compile(optimizer="adam", loss="mse")
+    return m
+
+
+# ── Training (can run in background thread) ─────────────────────────────────
+
+def _train_and_save(symbol: str, df: pd.DataFrame):
+    """Full training pipeline. Safe to call from a background thread."""
+    prices = df["y"].values.reshape(-1, 1)
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(prices)
+    X, y   = _build_sequences(scaled)
+
+    split    = int(len(X) * 0.8)
+    model    = _build_model()
+    es       = EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True)
+    model.fit(X[:split], y[:split],
+              validation_data=(X[split:], y[split:]),
+              epochs=80, batch_size=32,
+              callbacks=[es], verbose=0)
+    _save(symbol, model, scaler)
+    with _training_lock:
+        _currently_training.discard(symbol)
+
+
+def _spawn_training(symbol: str, df: pd.DataFrame):
+    """Start a background training thread if not already running."""
+    with _training_lock:
+        if symbol in _currently_training:
+            return
+        _currently_training.add(symbol)
+    t = threading.Thread(target=_train_and_save, args=(symbol, df), daemon=True)
+    t.start()
+    print(f"[BG] Training started for {symbol}")
+
+
+# ── Get-or-train ────────────────────────────────────────────────────────────
+
+def get_or_train_model(symbol: str, df: pd.DataFrame):
+    """
+    Returns (model, scaler, last_window) — always fast if cache exists.
+    If no cache: trains synchronously (first-ever request for that symbol).
+    If cache is stale: returns stale model immediately, retrains in background.
+    """
+    prices = df["y"].values.reshape(-1, 1)
+
+    if _is_fresh(symbol):
+        model, scaler = _load(symbol)
+        scaled        = scaler.transform(prices)
+        return model, scaler, scaled[-LOOKBACK:, 0]
+
+    # Check if stale (files exist but expired)
+    p = _paths(symbol)
+    if all(os.path.exists(v) for v in p.values()):
+        # Return stale model now, retrain in background
+        model, scaler = _load(symbol)
+        scaled        = scaler.transform(prices)
+        _spawn_training(symbol, df)          # async retrain
+        return model, scaler, scaled[-LOOKBACK:, 0]
+
+    # No model at all — train synchronously (unavoidable first time)
+    print(f"[Train] First-time training for {symbol}…")
+    _train_and_save(symbol, df)
+    model, scaler = _load(symbol)
+    scaled        = scaler.transform(prices)
+    return model, scaler, scaled[-LOOKBACK:, 0]
+
+
+# ── Forecast helpers ────────────────────────────────────────────────────────
+
+def _forecast_days(model, last_window: np.ndarray, n_days: int, scaler) -> np.ndarray:
+    win   = last_window.copy().reshape(1, LOOKBACK, 1)
+    preds = []
+    for _ in range(n_days):
+        p = model.predict(win, verbose=0)[0, 0]
+        preds.append(p)
+        win = np.roll(win, -1, axis=1)
+        win[0, -1, 0] = p
+    return scaler.inverse_transform(np.array(preds).reshape(-1, 1)).flatten()
+
+def _ci(preds: np.ndarray, z: float = 1.65):
+    sigma = preds.std() * 0.05
+    delta = z * sigma * np.sqrt(np.arange(1, len(preds) + 1))
+    return preds - delta, preds + delta
+
+
+# ── Public API ──────────────────────────────────────────────────────────────
+
+def get_aggregated_forecast(symbol: str, forecast_type: str = "6m") -> pd.DataFrame | None:
+    df = fetch_polygon_data(symbol)
+    if df is None or df.empty:
+        return None
+
+    model, scaler, last_win = get_or_train_model(symbol, df)
+    last_date = df["ds"].max()
+
+    if forecast_type == "6m":
+        n      = 180
+        preds  = _forecast_days(model, last_win, n, scaler)
+        dates  = pd.bdate_range(start=last_date + timedelta(days=1), periods=n)[:n]
+        lo, hi = _ci(preds)
+        tmp    = pd.DataFrame({"ds": dates, "yhat": preds, "yhat_lower": lo, "yhat_upper": hi})
+        tmp["period"] = tmp["ds"].dt.to_period("M")
+        agg    = tmp.groupby("period")[["yhat","yhat_lower","yhat_upper"]].mean().reset_index()
+        agg["ds"] = agg["period"].dt.to_timestamp()
+        return agg[["ds","yhat","yhat_lower","yhat_upper"]].head(6)
+
+    elif forecast_type == "5y":
+        n      = 365 * 5 + 30
+        preds  = _forecast_days(model, last_win, n, scaler)
+        dates  = pd.bdate_range(start=last_date + timedelta(days=1), periods=n)[:n]
+        lo, hi = _ci(preds)
+        tmp    = pd.DataFrame({"ds": dates, "yhat": preds, "yhat_lower": lo, "yhat_upper": hi})
+        tmp["year"] = tmp["ds"].dt.year
+        agg    = tmp.groupby("year")[["yhat","yhat_lower","yhat_upper"]].mean().reset_index()
+        agg["ds"] = pd.to_datetime(agg["year"].astype(str) + "-01-01")
+        return agg[["ds","yhat","yhat_lower","yhat_upper"]].head(5)
+
+    return None
+
+
+def generate_stock_plot(symbol: str, forecast_type: str = "6m") -> str | None:
+    fdf = get_aggregated_forecast(symbol, forecast_type)
+    if fdf is None or fdf.empty:
+        return None
+
+    fig, ax = plt.subplots(figsize=(10, 4.5), dpi=110)
+    label   = "Monthly Avg" if forecast_type == "6m" else "Yearly Avg"
+    title   = (f"{symbol} — {'6-Month' if forecast_type=='6m' else '5-Year'} "
+               f"LSTM Forecast ({label})")
+
+    ax.plot(fdf["ds"], fdf["yhat"], marker="o", color="#6c5ce7", linewidth=2, label="Predicted")
+    ax.fill_between(fdf["ds"], fdf["yhat_lower"], fdf["yhat_upper"],
+                    alpha=0.25, color="#a29bfe", label="90% CI")
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=10)
+    ax.set_xlabel("Date"); ax.set_ylabel("Price (USD)")
+    ax.legend(fontsize=9); ax.grid(True, linestyle="--", alpha=0.6)
+    plt.xticks(rotation=35); plt.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode()
