@@ -1,26 +1,21 @@
 """
-db.py — PostgreSQL connection pool + all DB operations for StockWise
-Includes user auth (register/login) + user-scoped portfolio/alerts
+db.py — PostgreSQL (Supabase) connection pool + all DB operations
 """
 import os
-from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 import psycopg2
 from psycopg2 import pool, Error
 from psycopg2.extras import RealDictCursor
 
 # ── Connection config ────────────────────────────────────────────────────────
-# On Render, set DATABASE_URL env var (Render PostgreSQL provides this automatically).
-# Falls back to individual vars for local dev.
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-
 DB_CONFIG = {
-    "host":     os.getenv("DB_HOST", "localhost"),
-    "user":     os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "dbname":   os.getenv("DB_NAME", "stockwise_db"),
-    "port":     int(os.getenv("DB_PORT", "5432")),
+    "host":             os.getenv("DB_HOST", "localhost"),
+    "user":             os.getenv("DB_USER", "postgres"),
+    "password":         os.getenv("DB_PASSWORD", ""),
+    "dbname":           os.getenv("DB_NAME", "postgres"),
+    "port":             int(os.getenv("DB_PORT", "5432")),
+    "sslmode":          "require",
+    "connect_timeout":  10,
 }
 
 _pool = None
@@ -28,10 +23,7 @@ _pool = None
 def get_pool():
     global _pool
     if _pool is None:
-        if DATABASE_URL:
-            _pool = pool.SimpleConnectionPool(1, 5, dsn=DATABASE_URL, sslmode="require")
-        else:
-            _pool = pool.SimpleConnectionPool(1, 5, **DB_CONFIG)
+        _pool = pool.SimpleConnectionPool(1, 5, **DB_CONFIG)
     return _pool
 
 def get_conn():
@@ -50,7 +42,6 @@ def _dict_cursor(conn):
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
 def register_user(username: str, email: str, password: str, phone: str = None):
-    """Returns (True, user_dict) or (False, error_message)."""
     conn = None
     try:
         conn = get_conn()
@@ -60,8 +51,7 @@ def register_user(username: str, email: str, password: str, phone: str = None):
             return False, "Email or username already exists."
         hashed = generate_password_hash(password)
         cur.execute(
-            """INSERT INTO users (username, email, password_hash, phone_number)
-               VALUES (%s,%s,%s,%s) RETURNING id""",
+            "INSERT INTO users (username, email, password_hash, phone_number) VALUES (%s,%s,%s,%s) RETURNING id",
             (username, email, hashed, phone)
         )
         uid = cur.fetchone()["id"]
@@ -78,7 +68,6 @@ def register_user(username: str, email: str, password: str, phone: str = None):
 
 
 def login_user(email: str, password: str):
-    """Returns (True, user_dict) or (False, error_message)."""
     conn = None
     try:
         conn = get_conn()
@@ -108,10 +97,7 @@ def get_user_by_id(user_id: int):
     try:
         conn = get_conn()
         cur  = _dict_cursor(conn)
-        cur.execute(
-            "SELECT id, username, email, phone_number, created_at FROM users WHERE id=%s",
-            (user_id,)
-        )
+        cur.execute("SELECT id, username, email, phone_number, created_at FROM users WHERE id=%s", (user_id,))
         u = cur.fetchone()
         if u:
             u = dict(u)
@@ -177,13 +163,11 @@ def buy_stock(symbol, company, quantity, price, stop_loss, take_profit, phone, u
             INSERT INTO portfolio
               (user_id, stock_symbol, company_name, quantity, buy_price,
                current_price, stop_loss, take_profit, status, phone_number)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'open',%s)
-            RETURNING id
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'open',%s) RETURNING id
         """, (user_id, symbol, company, quantity, price, price, stop_loss, take_profit, phone))
         pid = cur.fetchone()[0]
         cur.execute("""
-            INSERT INTO transactions
-              (portfolio_id, action, stock_symbol, quantity, price, total_value, note)
+            INSERT INTO transactions (portfolio_id, action, stock_symbol, quantity, price, total_value, note)
             VALUES (%s,'buy',%s,%s,%s,%s,'Manual buy')
         """, (pid, symbol, quantity, price, round(quantity * price, 4)))
         conn.commit()
@@ -215,16 +199,14 @@ def sell_stock(portfolio_id: int, sell_price: float, action: str = "sell", user_
         pos = dict(pos)
         pnl = round((sell_price - float(pos["buy_price"])) * float(pos["quantity"]), 4)
         cur.execute("""
-            UPDATE portfolio
-            SET status=%s, sold_at=NOW(), sell_price=%s, pnl=%s, current_price=%s
+            UPDATE portfolio SET status=%s, sold_at=NOW(), sell_price=%s, pnl=%s, current_price=%s
             WHERE id=%s
         """, (action, sell_price, pnl, sell_price, portfolio_id))
         cur.execute("""
-            INSERT INTO transactions
-              (portfolio_id, action, stock_symbol, quantity, price, total_value, note)
+            INSERT INTO transactions (portfolio_id, action, stock_symbol, quantity, price, total_value, note)
             VALUES (%s,%s,%s,%s,%s,%s,%s)
         """, (portfolio_id, action, pos["stock_symbol"], pos["quantity"],
-              sell_price, round(float(pos["quantity"]) * sell_price, 4), f"PnL: ₹{pnl}"))
+              sell_price, round(float(pos["quantity"]) * sell_price, 4), f"PnL: {pnl}"))
         conn.commit()
         return True
     except Error as e:
@@ -243,10 +225,7 @@ def get_open_positions(user_id: int = None):
         conn = get_conn()
         cur  = _dict_cursor(conn)
         if user_id:
-            cur.execute(
-                "SELECT * FROM portfolio WHERE status='open' AND user_id=%s ORDER BY bought_at DESC",
-                (user_id,)
-            )
+            cur.execute("SELECT * FROM portfolio WHERE status='open' AND user_id=%s ORDER BY bought_at DESC", (user_id,))
         else:
             cur.execute("SELECT * FROM portfolio WHERE status='open' ORDER BY bought_at DESC")
         return [dict(r) for r in cur.fetchall()]
@@ -265,10 +244,7 @@ def get_all_positions(user_id: int = None):
         conn = get_conn()
         cur  = _dict_cursor(conn)
         if user_id:
-            cur.execute(
-                "SELECT * FROM portfolio WHERE user_id=%s ORDER BY bought_at DESC",
-                (user_id,)
-            )
+            cur.execute("SELECT * FROM portfolio WHERE user_id=%s ORDER BY bought_at DESC", (user_id,))
         else:
             cur.execute("SELECT * FROM portfolio ORDER BY bought_at DESC")
         return [dict(r) for r in cur.fetchall()]
@@ -307,8 +283,8 @@ def get_portfolio_summary(user_id: int = None):
                 SELECT
                     COUNT(*) FILTER (WHERE status='open')  AS open_count,
                     COUNT(*) FILTER (WHERE status!='open') AS closed_count,
-                    COALESCE(SUM(CASE WHEN status='open' THEN quantity*buy_price END), 0) AS invested,
-                    COALESCE(SUM(pnl), 0) AS total_pnl
+                    COALESCE(SUM(CASE WHEN status='open' THEN quantity*buy_price END),0) AS invested,
+                    COALESCE(SUM(pnl),0) AS total_pnl
                 FROM portfolio WHERE user_id=%s
             """, (user_id,))
         else:
@@ -316,8 +292,8 @@ def get_portfolio_summary(user_id: int = None):
                 SELECT
                     COUNT(*) FILTER (WHERE status='open')  AS open_count,
                     COUNT(*) FILTER (WHERE status!='open') AS closed_count,
-                    COALESCE(SUM(CASE WHEN status='open' THEN quantity*buy_price END), 0) AS invested,
-                    COALESCE(SUM(pnl), 0) AS total_pnl
+                    COALESCE(SUM(CASE WHEN status='open' THEN quantity*buy_price END),0) AS invested,
+                    COALESCE(SUM(pnl),0) AS total_pnl
                 FROM portfolio
             """)
         row = cur.fetchone()
