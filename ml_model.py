@@ -74,34 +74,15 @@ def _load(symbol: str):
 
 # ── Data fetching via yfinance ───────────────────────────────────────────────
 
-def _yf_session():
-    """Create a requests session with browser headers to avoid cloud IP blocks."""
-    import requests as _req
-    s = _req.Session()
-    s.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection":      "keep-alive",
-    })
-    return s
-
-
 def fetch_stock_data(symbol: str) -> pd.DataFrame | None:
     """
     Fetch 5 years of daily closing prices using yfinance.
     Works for Indian stocks (RELIANCE.NS) and US stocks (AAPL).
-    Uses custom session to avoid Yahoo rate-limiting on cloud/Render IPs.
     """
     import time
     for attempt in range(3):
         try:
-            ticker = yf.Ticker(symbol, session=_yf_session())
+            ticker = yf.Ticker(symbol)
             df     = ticker.history(period="5y")
             if df.empty:
                 print(f"[yfinance] No data for {symbol} (attempt {attempt+1})")

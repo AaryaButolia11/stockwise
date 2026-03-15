@@ -50,28 +50,9 @@ def load_nifty50():
 
 # ── Fast batch data fetch ─────────────────────────────────────────────────────
 
-def _yf_session():
-    """Browser-like session to avoid Yahoo rate-limiting on cloud/Render IPs."""
-    import requests as _req
-    s = _req.Session()
-    s.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection":      "keep-alive",
-    })
-    return s
-
-
 def _batch_fetch(symbols: list, period: str = "30d") -> dict:
     """
     Download all symbols in ONE yfinance call — far faster than one-by-one.
-    Uses custom session to avoid Yahoo rate-limiting on cloud/Render IPs.
     Returns dict: symbol -> DataFrame
     """
     if not symbols:
@@ -87,7 +68,6 @@ def _batch_fetch(symbols: list, period: str = "30d") -> dict:
                 auto_adjust=True,
                 progress=False,
                 threads=True,
-                session=_yf_session(),
             )
             result = {}
             if len(symbols) == 1:

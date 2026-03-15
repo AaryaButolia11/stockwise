@@ -21,43 +21,24 @@ def fetch_current_price(symbol: str):
     Fetch latest closing price using yfinance.
     Works for Indian stocks (RELIANCE.NS) and US stocks (AAPL).
     Returns (price, symbol) or (None, None) on failure.
-    Includes retry with custom headers to avoid Render/cloud IP blocks.
     """
-    import time, requests
-
-    # Custom session with browser-like headers to avoid Yahoo rate limiting on cloud IPs
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection":      "keep-alive",
-    })
-
+    import time
     for attempt in range(3):
         try:
-            ticker = yf.Ticker(symbol, session=session)
-            # Try fast_info first (single API call)
+            ticker = yf.Ticker(symbol)
             try:
                 price = ticker.fast_info.last_price
                 if price and price > 0:
                     return float(price), symbol
             except Exception:
                 pass
-            # Fallback: history
             hist = ticker.history(period="2d")
             if not hist.empty:
                 return float(hist["Close"].iloc[-1]), symbol
         except Exception as e:
             print(f"[yfinance] Attempt {attempt+1} failed for {symbol}: {e}")
             if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))   # 1.5s, 3s backoff
-
+                time.sleep(2)
     print(f"[yfinance] All attempts failed for {symbol}")
     return None, None
 
