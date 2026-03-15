@@ -5,8 +5,9 @@ Includes user auth (register/login) + user-scoped portfolio/alerts
 import os
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
-import mysql.connector
-from mysql.connector import pooling, Error
+import psycopg2
+from psycopg2 import pool, Error
+from psycopg2.extras import RealDictCursor
 
 DB_CONFIG = {
     "host":     os.getenv("DB_HOST", "localhost"),
