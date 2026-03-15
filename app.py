@@ -361,6 +361,42 @@ def portfolio_view():
 
 
 # ══════════════════════════════════════════════════════════════════
+# AI RECOMMENDATIONS
+# ══════════════════════════════════════════════════════════════════
+
+@app.route("/recommendations")
+@login_required
+def get_recommendations():
+    """Get today's top 5 AI recommended stocks."""
+    try:
+        from recommender import get_todays_recommendations, generate_recommendations, save_recommendations
+        recs = get_todays_recommendations()
+        if not recs:
+            # Generate fresh if none exist for today
+            print("[App] No recommendations found — generating now...")
+            recs = generate_recommendations()
+            if recs:
+                save_recommendations(recs)
+        return jsonify({"recommendations": recs, "date": str(__import__('datetime').date.today())})
+    except Exception as e:
+        print(f"[Recommendations] Error: {e}")
+        return jsonify({"recommendations": [], "error": str(e)}), 500
+
+@app.route("/recommendations/refresh", methods=["POST"])
+@login_required
+def refresh_recommendations():
+    """Manually trigger recommendation generation."""
+    try:
+        from recommender import generate_recommendations, save_recommendations
+        recs = generate_recommendations()
+        if recs:
+            save_recommendations(recs)
+        return jsonify({"message": f"Generated {len(recs)} recommendations", "recommendations": recs})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════
 # HEALTH
 # ══════════════════════════════════════════════════════════════════
 

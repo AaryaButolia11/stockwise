@@ -64,3 +64,34 @@ CREATE TABLE IF NOT EXISTS transactions (
     note          VARCHAR(255),
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Daily AI stock recommendations
+CREATE TABLE IF NOT EXISTS ai_recommendations (
+    id              SERIAL PRIMARY KEY,
+    date            DATE NOT NULL,
+    stock_symbol    VARCHAR(20) NOT NULL,
+    company_name    VARCHAR(255),
+    score           DECIMAL(8,4),
+    predicted_gain  DECIMAL(8,4),   -- % predicted gain for the day
+    current_price   DECIMAL(15,4),
+    target_price    DECIMAL(15,4),
+    reason          TEXT,
+    rank            INT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(date, stock_symbol)
+);
+
+-- Daily price tracking (open + close)
+CREATE TABLE IF NOT EXISTS daily_prices (
+    id           SERIAL PRIMARY KEY,
+    date         DATE NOT NULL,
+    stock_symbol VARCHAR(20) NOT NULL,
+    open_price   DECIMAL(15,4),
+    close_price  DECIMAL(15,4),
+    high_price   DECIMAL(15,4),
+    low_price    DECIMAL(15,4),
+    volume       BIGINT,
+    pct_change   DECIMAL(8,4),
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(date, stock_symbol)
+);
