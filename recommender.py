@@ -1,34 +1,26 @@
 """
-recommender.py — AI Stock Recommender for Nifty 50
-Runs every morning at 9:15 AM IST.
-Scores all 50 stocks and picks top 5 to buy.
-
-Scoring factors:
-  1. LSTM predicted gain (40%) — our trained model's forecast
-  2. Momentum score (30%)      — recent price trend (5d, 10d, 20d)
-  3. Volatility score (20%)    — lower volatility = safer bet
-  4. Volume surge (10%)        — unusual buying activity
+recommender.py — Fast AI Stock Recommender for Nifty 50
+Schema-aligned to existing Supabase tables:
+  - ai_recommendations.rank  (not rec_rank)
+  - No UNIQUE constraint on ai_recommendations → use DELETE+INSERT
+  - No UNIQUE constraint on daily_prices       → use DELETE+INSERT
 """
 
 import os, csv, traceback
-from datetime import datetime, date, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, date
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import pytz
 
-# ── IST timezone ─────────────────────────────────────────────────────────────
 IST = pytz.timezone("Asia/Kolkata")
 
-def _ist_now():
-    return datetime.now(IST)
-
-def _is_market_day():
-    """Monday–Friday only (simplified — doesn't check NSE holidays)."""
-    return _ist_now().weekday() < 5
+def _ist_now():      return datetime.now(IST)
+def _is_market_day(): return _ist_now().weekday() < 5
 
 
-# ── Load all Nifty 50 symbols ────────────────────────────────────────────────
+# ── Load Nifty 50 ─────────────────────────────────────────────────────────────
 
 def load_nifty50():
     path = os.path.join(os.path.dirname(__file__), "companies_india.csv")
@@ -37,242 +29,215 @@ def load_nifty50():
         with open(path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 if "Symbol" in row and "Company" in row:
-                    out.append((row["Symbol"], row["Company"]))
+                    out.append((row["Symbol"].strip(), row["Company"].strip()))
     except Exception as e:
         print(f"[Recommender] Error loading companies: {e}")
     return out
 
 
-# ── Scoring functions ─────────────────────────────────────────────────────────
+# ── Batch yfinance fetch ──────────────────────────────────────────────────────
 
-def _momentum_score(hist: pd.DataFrame) -> float:
-    """
-    Returns score 0-100.
-    Combines 5-day, 10-day, 20-day price momentum.
-    """
-    if len(hist) < 21:
-        return 50.0
-    close = hist["Close"].values
+def _batch_fetch(symbols: list, period: str = "30d") -> dict:
+    if not symbols:
+        return {}
     try:
-        m5  = (close[-1] - close[-6])  / close[-6]  * 100
-        m10 = (close[-1] - close[-11]) / close[-11] * 100
-        m20 = (close[-1] - close[-21]) / close[-21] * 100
-        # Weighted average — short term matters more
-        score = (m5 * 0.5) + (m10 * 0.3) + (m20 * 0.2)
-        # Normalize to 0-100
-        return min(100, max(0, 50 + score * 5))
-    except Exception:
-        return 50.0
-
-
-def _volatility_score(hist: pd.DataFrame) -> float:
-    """
-    Returns score 0-100.
-    Lower volatility = higher score (safer stocks preferred).
-    """
-    if len(hist) < 10:
-        return 50.0
-    try:
-        returns = hist["Close"].pct_change().dropna()
-        vol     = returns.std() * 100  # daily std in %
-        # vol of 1% = score 80, vol of 3% = score 40, vol of 5%+ = score 10
-        score = max(10, 100 - (vol * 20))
-        return min(100, score)
-    except Exception:
-        return 50.0
-
-
-def _volume_score(hist: pd.DataFrame) -> float:
-    """
-    Returns score 0-100.
-    Checks if today's volume is higher than 20-day average.
-    Volume surge = strong buying interest.
-    """
-    if len(hist) < 5:
-        return 50.0
-    try:
-        avg_vol  = hist["Volume"].iloc[:-1].mean()
-        last_vol = hist["Volume"].iloc[-1]
-        if avg_vol == 0:
-            return 50.0
-        ratio = last_vol / avg_vol
-        # 2x volume = score 100, 1x = score 50, 0.5x = score 25
-        return min(100, ratio * 50)
-    except Exception:
-        return 50.0
-
-
-def _lstm_predicted_gain(symbol: str, current_price: float) -> float:
-    """
-    Uses our trained LSTM model to predict next-day gain %.
-    Returns predicted % change (positive = gain, negative = loss).
-    """
-    try:
-        from ml_model import get_aggregated_forecast, fetch_stock_data, get_or_train_model, _forecast_days, _ci, LOOKBACK
-        df = fetch_stock_data(symbol)
-        if df is None or df.empty or len(df) < LOOKBACK + 10:
-            return 0.0
-
-        model, scaler, last_win = get_or_train_model(symbol, df)
-        # Predict next 5 days and take average
-        preds = _forecast_days(model, last_win, 5, scaler)
-        avg_5d_price    = float(np.mean(preds))
-        predicted_gain  = ((avg_5d_price - current_price) / current_price) * 100
-        return round(predicted_gain, 2)
-    except Exception as e:
-        print(f"[LSTM] Prediction error for {symbol}: {e}")
-        return 0.0
-
-
-# ── Main scoring ──────────────────────────────────────────────────────────────
-
-def score_stock(symbol: str, company: str) -> dict | None:
-    """
-    Score a single stock. Returns dict with all metrics or None on failure.
-    """
-    try:
-        ticker = yf.Ticker(symbol)
-        hist   = ticker.history(period="30d")
-
-        if hist.empty or len(hist) < 5:
-            return None
-
-        current_price = float(hist["Close"].iloc[-1])
-        open_price    = float(hist["Open"].iloc[-1])
-
-        mom_score = _momentum_score(hist)
-        vol_score = _volatility_score(hist)
-        vum_score = _volume_score(hist)
-        lstm_gain = _lstm_predicted_gain(symbol, current_price)
-
-        # LSTM gain converted to 0-100 score
-        # +5% gain = 100, 0% = 50, -5% = 0
-        lstm_score = min(100, max(0, 50 + lstm_gain * 10))
-
-        # Weighted total score
-        total_score = (
-            lstm_score  * 0.40 +
-            mom_score   * 0.30 +
-            vol_score   * 0.20 +
-            vum_score   * 0.10
+        raw = yf.download(
+            tickers=symbols, period=period, interval="1d",
+            group_by="ticker", auto_adjust=True,
+            progress=False, threads=True,
         )
+        result = {}
+        if len(symbols) == 1:
+            if not raw.empty:
+                result[symbols[0]] = raw
+        else:
+            for sym in symbols:
+                try:
+                    df = raw[sym].dropna(how="all")
+                    if not df.empty:
+                        result[sym] = df
+                except Exception:
+                    pass
+        return result
+    except Exception as e:
+        print(f"[Recommender] Batch fetch error: {e}")
+        return {}
 
-        # Build human-readable reason
+
+# ── Technical scoring ─────────────────────────────────────────────────────────
+
+def _momentum_score(hist) -> float:
+    if len(hist) < 21: return 50.0
+    c = hist["Close"].values
+    try:
+        score = ((c[-1]-c[-6])/c[-6]*.5 + (c[-1]-c[-11])/c[-11]*.3 + (c[-1]-c[-21])/c[-21]*.2) * 100 * 5
+        return float(min(100, max(0, 50 + score)))
+    except: return 50.0
+
+def _volatility_score(hist) -> float:
+    if len(hist) < 10: return 50.0
+    try:
+        vol = hist["Close"].pct_change().dropna().std() * 100
+        return float(min(100, max(10, 100 - vol * 20)))
+    except: return 50.0
+
+def _volume_score(hist) -> float:
+    if len(hist) < 5: return 50.0
+    try:
+        avg = hist["Volume"].iloc[:-1].mean()
+        return float(min(100, (hist["Volume"].iloc[-1] / avg * 50) if avg else 50.0))
+    except: return 50.0
+
+def _gap_score(hist) -> float:
+    if len(hist) < 2: return 50.0
+    try:
+        gap = ((float(hist["Open"].iloc[-1]) - float(hist["Close"].iloc[-2]))
+               / float(hist["Close"].iloc[-2]) * 100)
+        return float(min(100, max(0, 50 + gap * 25)))
+    except: return 50.0
+
+def _estimate_gain(hist) -> float:
+    if len(hist) < 10: return 0.0
+    try:
+        closes = hist["Close"].values[-10:]
+        x = np.arange(len(closes))
+        slope, intercept = np.polyfit(x, closes, 1)
+        predicted = intercept + slope * (len(closes) + 4)
+        return float(round(((predicted - closes[-1]) / closes[-1]) * 100, 2))
+    except: return 0.0
+
+
+def _score_from_hist(symbol: str, company: str, hist):
+    try:
+        if hist is None or hist.empty or len(hist) < 5:
+            return None
+        current_price = float(hist["Close"].iloc[-1])
+        mom  = _momentum_score(hist)
+        vol  = _volatility_score(hist)
+        vum  = _volume_score(hist)
+        gap  = _gap_score(hist)
+        gain = _estimate_gain(hist)
+        total = mom*.40 + vol*.30 + vum*.20 + gap*.10
         reasons = []
-        if mom_score > 65:
-            reasons.append("strong upward momentum")
-        if vol_score > 70:
-            reasons.append("low volatility")
-        if vum_score > 70:
-            reasons.append("high buying volume")
-        if lstm_gain > 1:
-            reasons.append(f"LSTM predicts +{lstm_gain:.1f}% gain")
-        elif lstm_gain > 0:
-            reasons.append(f"positive LSTM outlook")
-
-        reason = "Based on " + ", ".join(reasons) if reasons else "Balanced risk-reward profile"
-
-        # Target price based on LSTM prediction
-        target_price = round(current_price * (1 + lstm_gain / 100), 2)
-
+        if mom  > 65: reasons.append("strong upward momentum")
+        if vol  > 70: reasons.append("low volatility")
+        if vum  > 70: reasons.append("high buying volume")
+        if gap  > 65: reasons.append("gap-up open")
+        if gain > 1:  reasons.append(f"trend projects +{gain:.1f}%")
         return {
             "symbol":         symbol,
             "company":        company,
-            "score":          round(total_score, 2),
-            "predicted_gain": lstm_gain,
+            "score":          round(total, 2),
+            "predicted_gain": gain,
             "current_price":  current_price,
-            "open_price":     open_price,
-            "target_price":   target_price,
-            "reason":         reason,
-            "momentum":       round(mom_score, 1),
-            "volatility":     round(vol_score, 1),
-            "volume":         round(vum_score, 1),
+            "open_price":     float(hist["Open"].iloc[-1]),
+            "target_price":   round(current_price * (1 + gain / 100), 2),
+            "reason":         ("Based on " + ", ".join(reasons)) if reasons
+                              else "Balanced risk-reward profile",
+            "momentum":       round(mom, 1),
+            "volatility":     round(vol, 1),
+            "volume":         round(vum, 1),
         }
     except Exception as e:
-        print(f"[Recommender] Error scoring {symbol}: {e}")
+        print(f"[Recommender] Score error {symbol}: {e}")
         return None
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def generate_recommendations() -> list:
-    """
-    Score all Nifty 50 stocks and return top 5.
-    This is called every morning at 9:15 AM IST.
-    """
-    print(f"[Recommender] Generating recommendations for {date.today()}...")
-    stocks  = load_nifty50()
-    results = []
-
-    for symbol, company in stocks:
-        print(f"[Recommender] Scoring {symbol}...")
-        scored = score_stock(symbol, company)
-        if scored:
-            results.append(scored)
-
-    if not results:
-        print("[Recommender] No results generated.")
+    print(f"[Recommender] Fast recommendations for {date.today()}...")
+    stocks = load_nifty50()
+    if not stocks:
         return []
-
-    # Sort by total score descending
+    symbols     = [s for s, _ in stocks]
+    company_map = {s: c for s, c in stocks}
+    print(f"[Recommender] Batch fetching {len(symbols)} symbols...")
+    hist_map = _batch_fetch(symbols, period="30d")
+    print(f"[Recommender] Got data for {len(hist_map)}/{len(symbols)} symbols.")
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = {
+            ex.submit(_score_from_hist, s, company_map[s], hist_map[s]): s
+            for s in hist_map
+        }
+        for fut in as_completed(futures):
+            r = fut.result()
+            if r: results.append(r)
+    if not results:
+        return []
     results.sort(key=lambda x: x["score"], reverse=True)
     top5 = results[:5]
-
-    # Add rank
     for i, r in enumerate(top5):
         r["rank"] = i + 1
-
     print(f"[Recommender] Top 5: {[r['symbol'] for r in top5]}")
     return top5
 
 
-# ── DB persistence ────────────────────────────────────────────────────────────
+def score_stock(symbol: str, company: str):
+    try:
+        return _score_from_hist(symbol, company, yf.Ticker(symbol).history(period="30d"))
+    except Exception as e:
+        print(f"[Recommender] score_stock error {symbol}: {e}")
+        return None
+
+
+# ── DB persistence — matches exact Supabase schema ───────────────────────────
 
 def save_recommendations(recommendations: list):
-    """Save today's top 5 to database."""
+    """
+    Supabase ai_recommendations has no UNIQUE constraint,
+    so we DELETE today's rows first, then INSERT fresh ones.
+    Column name is 'rank' (as in the actual table).
+    """
     import db
+    conn = cur = None
     try:
-        conn = db.get_conn()
-        cur  = conn.cursor()
+        conn  = db.get_conn()
+        cur   = conn.cursor()
         today = date.today()
-
-        # Clear today's old recommendations first
+        # Clear today's existing rows
         cur.execute("DELETE FROM ai_recommendations WHERE date=%s", (today,))
-
         for r in recommendations:
             cur.execute("""
                 INSERT INTO ai_recommendations
                   (date, stock_symbol, company_name, score, predicted_gain,
                    current_price, target_price, reason, rank)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (date, stock_symbol) DO UPDATE SET
-                  score=EXCLUDED.score,
-                  predicted_gain=EXCLUDED.predicted_gain,
-                  current_price=EXCLUDED.current_price,
-                  target_price=EXCLUDED.target_price,
-                  reason=EXCLUDED.reason,
-                  rank=EXCLUDED.rank
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
-                today, r["symbol"], r["company"], r["score"],
-                r["predicted_gain"], r["current_price"],
-                r["target_price"], r["reason"], r["rank"]
+                today,
+                r["symbol"],
+                r["company"],
+                r["score"],
+                r["predicted_gain"],
+                r["current_price"],
+                r["target_price"],
+                r["reason"],
+                r["rank"],
             ))
         conn.commit()
-        print(f"[Recommender] Saved {len(recommendations)} recommendations to DB.")
+        print(f"[Recommender] Saved {len(recommendations)} recommendations.")
         return True
     except Exception as e:
+        if conn: conn.rollback()
         print(f"[Recommender] DB save error: {e}")
         traceback.print_exc()
         return False
     finally:
-        try: cur.close(); db.release_conn(conn)
-        except: pass
+        if cur:  cur.close()
+        if conn: db.release_conn(conn)
 
 
 def get_todays_recommendations() -> list:
-    """Fetch today's recommendations from DB."""
+    """
+    Fetch today's cached recs. Uses CURRENT_DATE (standard SQL).
+    Column is 'rank' matching the Supabase table.
+    """
     import db
+    conn = cur = None
     try:
         conn = db.get_conn()
-        cur  = conn.cursor(cursor_factory=__import__('psycopg2.extras', fromlist=['RealDictCursor']).RealDictCursor)
+        cur  = db._dict_cursor(conn)
         cur.execute("""
             SELECT * FROM ai_recommendations
             WHERE date = CURRENT_DATE
@@ -280,55 +245,59 @@ def get_todays_recommendations() -> list:
         """)
         rows = [dict(r) for r in cur.fetchall()]
         for r in rows:
-            if r.get("date"): r["date"] = str(r["date"])
+            if r.get("date"):       r["date"]       = str(r["date"])
             if r.get("created_at"): r["created_at"] = str(r["created_at"])
         return rows
     except Exception as e:
         print(f"[Recommender] DB fetch error: {e}")
         return []
     finally:
-        try: cur.close(); db.release_conn(conn)
-        except: pass
+        if cur:  cur.close()
+        if conn: db.release_conn(conn)
 
 
 def track_daily_prices():
     """
-    Track open + close prices for all Nifty 50.
-    Called at market open (9:15 AM) and close (3:30 PM).
+    Batch-fetch open/close for all Nifty 50.
+    daily_prices has no UNIQUE constraint → DELETE today's rows first.
     """
     import db
-    stocks = load_nifty50()
-    today  = date.today()
+    stocks   = load_nifty50()
+    symbols  = [s for s, _ in stocks]
+    today    = date.today()
+    hist_map = _batch_fetch(symbols, period="2d")
 
     for symbol, _ in stocks:
+        hist = hist_map.get(symbol)
+        if hist is None or hist.empty:
+            continue
+        conn = cur = None
         try:
-            ticker = yf.Ticker(symbol)
-            hist   = ticker.history(period="2d")
-            if hist.empty:
-                continue
-            row = hist.iloc[-1]
+            row  = hist.iloc[-1]
             conn = db.get_conn()
             cur  = conn.cursor()
+            # No UNIQUE constraint — delete existing row for today first
+            cur.execute(
+                "DELETE FROM daily_prices WHERE date=%s AND stock_symbol=%s",
+                (today, symbol)
+            )
             cur.execute("""
                 INSERT INTO daily_prices
-                  (date, stock_symbol, open_price, close_price, high_price, low_price, volume, pct_change)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (date, stock_symbol) DO UPDATE SET
-                  close_price=EXCLUDED.close_price,
-                  high_price=EXCLUDED.high_price,
-                  low_price=EXCLUDED.low_price,
-                  volume=EXCLUDED.volume,
-                  pct_change=EXCLUDED.pct_change
+                  (date, stock_symbol, open_price, close_price,
+                   high_price, low_price, volume, pct_change)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 today, symbol,
-                float(row["Open"]),
-                float(row["Close"]),
-                float(row["High"]),
-                float(row["Low"]),
+                float(row["Open"]),  float(row["Close"]),
+                float(row["High"]),  float(row["Low"]),
                 int(row["Volume"]),
-                round(((float(row["Close"]) - float(row["Open"])) / float(row["Open"])) * 100, 2)
+                round(((float(row["Close"]) - float(row["Open"]))
+                       / float(row["Open"])) * 100, 2),
             ))
             conn.commit()
-            db.release_conn(conn)
         except Exception as e:
-            print(f"[Prices] Error tracking {symbol}: {e}")
+            if conn: conn.rollback()
+            print(f"[Prices] Error {symbol}: {e}")
+        finally:
+            if cur:  cur.close()
+            if conn: db.release_conn(conn)

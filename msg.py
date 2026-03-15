@@ -2,6 +2,8 @@
 import os
 import requests
 import yfinance as yf
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=True)
 from twilio.rest import Client
 
 # ── Twilio credentials ──────────────────────────────────────────────────────
@@ -41,12 +43,13 @@ def fetch_current_price(symbol: str):
 # ── SMS ─────────────────────────────────────────────────────────────────────
 
 def send_alert_sms(to_phone_number: str, message: str) -> bool:
+    """Send SMS to any number including Indian (+91) numbers."""
     if not all([account_sid, auth_token, twilio_sms_number]):
         print("Twilio SMS credentials not set.")
         return False
     try:
         resp = client.messages.create(
-            body=message, from_=twilio_sms_number, to=to_phone_number
+            body=message, from_=twilio_sms_number, to=to_phone_number.strip()
         )
         print(f"SMS sent: {resp.sid}")
         return True

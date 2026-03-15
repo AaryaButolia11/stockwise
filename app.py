@@ -7,7 +7,8 @@ import pandas as pd
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 from dotenv import load_dotenv
-load_dotenv()
+# Always load .env from the same folder as app.py — works regardless of cwd
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
 from msg      import fetch_current_price, send_alert_sms, send_stock_news_alert
 from ml_model import generate_stock_plot, get_aggregated_forecast
@@ -364,36 +365,79 @@ def portfolio_view():
 # AI RECOMMENDATIONS
 # ══════════════════════════════════════════════════════════════════
 
-@app.route("/recommendations")
-@login_required
-def get_recommendations():
-    """Get today's top 5 AI recommended stocks."""
-    try:
-        from recommender import get_todays_recommendations, generate_recommendations, save_recommendations
-        recs = get_todays_recommendations()
-        if not recs:
-            # Generate fresh if none exist for today
-            print("[App] No recommendations found — generating now...")
-            recs = generate_recommendations()
-            if recs:
-                save_recommendations(recs)
-        return jsonify({"recommendations": recs, "date": str(__import__('datetime').date.today())})
-    except Exception as e:
-        print(f"[Recommendations] Error: {e}")
-        return jsonify({"recommendations": [], "error": str(e)}), 500
+import threading as _threading
+_reco_generating = False   # global flag — prevents duplicate background jobs
 
-@app.route("/recommendations/refresh", methods=["POST"])
-@login_required
-def refresh_recommendations():
-    """Manually trigger recommendation generation."""
+def _generate_and_save_bg():
+    """Run recommendation generation in background thread."""
+    global _reco_generating
     try:
         from recommender import generate_recommendations, save_recommendations
         recs = generate_recommendations()
         if recs:
             save_recommendations(recs)
-        return jsonify({"message": f"Generated {len(recs)} recommendations", "recommendations": recs})
+        print(f"[App] Background recommendations done: {len(recs)} saved.")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"[App] Background recommendation error: {e}")
+    finally:
+        _reco_generating = False
+
+
+@app.route("/recommendations")
+@login_required
+def get_recommendations():
+    """
+    Get today's top 5 AI recommended stocks.
+    • If cached in DB  → return instantly (< 5 ms).
+    • If not cached    → start background generation, return empty list
+                         with generating=True so the UI can poll again.
+    Never blocks the HTTP request with slow computation.
+    """
+    global _reco_generating
+    import datetime as _dt
+    try:
+        from recommender import get_todays_recommendations
+        recs = get_todays_recommendations()
+
+        if recs:
+            return jsonify({
+                "recommendations": recs,
+                "date": str(_dt.date.today()),
+                "generating": False,
+            })
+
+        # No cache → kick off background job if not already running
+        if not _reco_generating:
+            _reco_generating = True
+            t = _threading.Thread(target=_generate_and_save_bg, daemon=True)
+            t.start()
+            print("[App] Started background recommendation generation.")
+
+        return jsonify({
+            "recommendations": [],
+            "date": str(_dt.date.today()),
+            "generating": True,
+            "message": "Recommendations are being generated. Please check back in ~30 seconds.",
+        })
+    except Exception as e:
+        print(f"[Recommendations] Error: {e}")
+        return jsonify({"recommendations": [], "error": str(e), "generating": False}), 500
+
+
+@app.route("/recommendations/refresh", methods=["POST"])
+@login_required
+def refresh_recommendations():
+    """
+    Manually trigger recommendation refresh in background.
+    Returns immediately — client should poll /recommendations.
+    """
+    global _reco_generating
+    if _reco_generating:
+        return jsonify({"message": "Already generating. Please wait ~30 seconds.", "generating": True})
+    _reco_generating = True
+    t = _threading.Thread(target=_generate_and_save_bg, daemon=True)
+    t.start()
+    return jsonify({"message": "Refresh started. Poll /recommendations in ~30 seconds.", "generating": True})
 
 
 # ══════════════════════════════════════════════════════════════════

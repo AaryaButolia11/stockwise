@@ -4,10 +4,13 @@ scheduler.py — Background scheduler
   • Every day 9:15 AM IST: generate AI recommendations
   • Every day 3:30 PM IST: track closing prices
 """
+import os
 import threading
 import time
 from datetime import datetime
 import pytz
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
 from msg import fetch_current_price, send_alert_sms
 import db
