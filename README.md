@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # StockWise — AI-Powered Stock Intelligence
 
 > LSTM forecasting · Live price alerts · Paper trading portfolio · Auto stop-loss/take-profit
@@ -135,6 +134,3 @@ The background scheduler (`scheduler.py`) runs every 5 minutes:
 | POST | `/portfolio/sell` | Close a position |
 | GET | `/portfolio` | All positions + summary |
 | GET | `/health` | Health check (Fly.io) |
-=======
-# stockwise
->>>>>>> 06ef460b5ffc4f4737bc68167bf4dffe9af161d9
