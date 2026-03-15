@@ -2,8 +2,6 @@
 import os
 import requests
 import yfinance as yf
-from dotenv import load_dotenv
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=True)
 from twilio.rest import Client
 
 # ── Twilio credentials ──────────────────────────────────────────────────────
@@ -23,33 +21,56 @@ def fetch_current_price(symbol: str):
     Fetch latest closing price using yfinance.
     Works for Indian stocks (RELIANCE.NS) and US stocks (AAPL).
     Returns (price, symbol) or (None, None) on failure.
+    Includes retry with custom headers to avoid Render/cloud IP blocks.
     """
-    try:
-        ticker = yf.Ticker(symbol)
-        info   = ticker.fast_info
-        price  = info.last_price
-        if price is None or price == 0:
-            # fallback — use history
-            hist  = ticker.history(period="2d")
-            if hist.empty:
-                return None, None
-            price = float(hist["Close"].iloc[-1])
-        return float(price), symbol
-    except Exception as e:
-        print(f"[yfinance] Error fetching price for {symbol}: {e}")
-        return None, None
+    import time, requests
+
+    # Custom session with browser-like headers to avoid Yahoo rate limiting on cloud IPs
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection":      "keep-alive",
+    })
+
+    for attempt in range(3):
+        try:
+            ticker = yf.Ticker(symbol, session=session)
+            # Try fast_info first (single API call)
+            try:
+                price = ticker.fast_info.last_price
+                if price and price > 0:
+                    return float(price), symbol
+            except Exception:
+                pass
+            # Fallback: history
+            hist = ticker.history(period="2d")
+            if not hist.empty:
+                return float(hist["Close"].iloc[-1]), symbol
+        except Exception as e:
+            print(f"[yfinance] Attempt {attempt+1} failed for {symbol}: {e}")
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))   # 1.5s, 3s backoff
+
+    print(f"[yfinance] All attempts failed for {symbol}")
+    return None, None
 
 
 # ── SMS ─────────────────────────────────────────────────────────────────────
 
 def send_alert_sms(to_phone_number: str, message: str) -> bool:
-    """Send SMS to any number including Indian (+91) numbers."""
     if not all([account_sid, auth_token, twilio_sms_number]):
         print("Twilio SMS credentials not set.")
         return False
     try:
         resp = client.messages.create(
-            body=message, from_=twilio_sms_number, to=to_phone_number.strip()
+            body=message, from_=twilio_sms_number, to=to_phone_number
         )
         print(f"SMS sent: {resp.sid}")
         return True
