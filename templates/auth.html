@@ -54,8 +54,6 @@
         justify-content: center;
         padding: 2rem 1rem;
       }
-
-      /* Background pattern */
       body::before {
         content: "";
         position: fixed;
@@ -69,15 +67,12 @@
         opacity: 0.6;
         z-index: 0;
       }
-
       .wrap {
         position: relative;
         z-index: 1;
         width: 100%;
         max-width: 420px;
       }
-
-      /* Logo */
       .logo {
         text-align: center;
         margin-bottom: 2rem;
@@ -100,8 +95,6 @@
         text-transform: uppercase;
         margin-top: 0.2rem;
       }
-
-      /* Card */
       .card {
         background: var(--white);
         border: 1px solid var(--line);
@@ -109,7 +102,6 @@
         padding: 2.5rem 2rem;
         box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
       }
-
       .card-title {
         font-family: var(--font-d);
         font-size: 1.7rem;
@@ -123,16 +115,12 @@
         color: var(--ink-muted);
         margin-bottom: 1.8rem;
       }
-
-      /* Gold rule */
       .rule {
         width: 32px;
         height: 2px;
         background: var(--gold);
         margin-bottom: 1.5rem;
       }
-
-      /* Fields */
       .field {
         display: flex;
         flex-direction: column;
@@ -168,15 +156,11 @@
         color: var(--ink-muted);
         opacity: 0.5;
       }
-
-      /* Two column row */
       .row-2 {
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 0.8rem;
       }
-
-      /* Submit button */
       .btn-submit {
         width: 100%;
         padding: 0.9rem;
@@ -209,8 +193,6 @@
         opacity: 0.5;
         cursor: not-allowed;
       }
-
-      /* Status message */
       .status {
         display: none;
         font-size: 0.8rem;
@@ -240,8 +222,6 @@
         color: var(--gold);
         border-color: var(--gold);
       }
-
-      /* Switch link */
       .switch {
         text-align: center;
         margin-top: 1.5rem;
@@ -256,8 +236,6 @@
       .switch a:hover {
         text-decoration: underline;
       }
-
-      /* Divider */
       .divider {
         display: flex;
         align-items: center;
@@ -273,7 +251,6 @@
         height: 1px;
         background: var(--line);
       }
-
       @keyframes rise {
         from {
           opacity: 0;
@@ -284,8 +261,6 @@
           transform: translateY(0);
         }
       }
-
-      /* Spinner */
       .spin {
         width: 14px;
         height: 14px;
@@ -303,8 +278,6 @@
           transform: rotate(360deg);
         }
       }
-
-      /* Password strength bar */
       .pwd-bar {
         height: 3px;
         border-radius: 2px;
@@ -324,13 +297,11 @@
   </head>
   <body>
     <div class="wrap">
-      <!-- Logo -->
       <div class="logo">
         <div class="wordmark">Stock<em>Wise</em></div>
         <div class="sub">AI Stock Intelligence</div>
       </div>
 
-      <!-- Card -->
       <div class="card">
         <div class="rule"></div>
 
@@ -348,7 +319,6 @@
         >
           <div class="card-title">Welcome back</div>
           <div class="card-sub">Sign in to your account</div>
-
           <div class="field">
             <label>Email address</label>
             <input
@@ -367,7 +337,6 @@
               autocomplete="current-password"
             />
           </div>
-
           <button class="btn-submit" id="btn-login" onclick="doLogin()">
             <div class="spin" id="spin-login"></div>
             Sign In
@@ -389,7 +358,6 @@
         >
           <div class="card-title">Create account</div>
           <div class="card-sub">Start tracking your portfolio</div>
-
           <div class="row-2">
             <div class="field">
               <label>Username</label>
@@ -427,7 +395,6 @@
               <div class="pwd-fill" id="pwd-fill"></div>
             </div>
           </div>
-
           <button class="btn-submit" id="btn-register" onclick="doRegister()">
             <div class="spin" id="spin-register"></div>
             Create Account
@@ -435,7 +402,6 @@
           <div class="status" id="register-status"></div>
         </div>
 
-        <!-- Switch -->
         <div class="divider">or</div>
         <div class="switch" id="switch-text">
           {% if page == 'login' %} Don't have an account?
@@ -453,26 +419,22 @@
         el.className = "status show " + type;
         if (type !== "info") setTimeout(() => (el.className = "status"), 6000);
       }
-
       function setLoading(btnId, spinId, loading) {
         document.getElementById(btnId).disabled = loading;
         document.getElementById(spinId).classList.toggle("show", loading);
       }
-
       function showLogin() {
         document.getElementById("form-login").style.display = "block";
         document.getElementById("form-register").style.display = "none";
         document.getElementById("switch-text").innerHTML =
           "Don't have an account? <a href='#' onclick='showRegister()'>Create one</a>";
       }
-
       function showRegister() {
         document.getElementById("form-login").style.display = "none";
         document.getElementById("form-register").style.display = "block";
         document.getElementById("switch-text").innerHTML =
           "Already have an account? <a href='#' onclick='showLogin()'>Sign in</a>";
       }
-
       function checkPwd(val) {
         const fill = document.getElementById("pwd-fill");
         const len = val.length;
@@ -493,7 +455,6 @@
         fill.style.width = pct + "%";
         fill.style.background = color;
       }
-
       async function doLogin() {
         const email = document.getElementById("l-email").value.trim();
         const password = document.getElementById("l-password").value;
@@ -501,10 +462,8 @@
           showStatus("login-status", "Enter email and password.", "err");
           return;
         }
-
         setLoading("btn-login", "spin-login", true);
         showStatus("login-status", "Signing in…", "info");
-
         try {
           const res = await fetch("/api/login", {
             method: "POST",
@@ -524,13 +483,11 @@
           setLoading("btn-login", "spin-login", false);
         }
       }
-
       async function doRegister() {
         const username = document.getElementById("r-username").value.trim();
         const email = document.getElementById("r-email").value.trim();
         const password = document.getElementById("r-password").value;
         const phone = document.getElementById("r-phone").value.trim();
-
         if (!username || !email || !password) {
           showStatus(
             "register-status",
@@ -547,10 +504,8 @@
           );
           return;
         }
-
         setLoading("btn-register", "spin-register", true);
         showStatus("register-status", "Creating account…", "info");
-
         try {
           const res = await fetch("/api/register", {
             method: "POST",
@@ -561,7 +516,7 @@
           if (res.ok) {
             showStatus(
               "register-status",
-              `Account created! Redirecting…`,
+              "Account created! Redirecting…",
               "ok",
             );
             setTimeout(() => (window.location.href = "/"), 900);
@@ -578,8 +533,6 @@
           setLoading("btn-register", "spin-register", false);
         }
       }
-
-      // Enter key support
       document.addEventListener("keydown", (e) => {
         if (e.key !== "Enter") return;
         if (document.getElementById("form-login").style.display !== "none")
