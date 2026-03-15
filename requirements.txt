@@ -12,3 +12,4 @@ twilio==9.2.3
 newsapi-python==0.2.7
 werkzeug==3.0.3
 python-dotenv==1.0.1
+yfinance==0.2.37

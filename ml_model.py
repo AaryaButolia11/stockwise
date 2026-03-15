@@ -1,15 +1,16 @@
 """
-ml_model.py — LSTM forecast with:
-  • disk-cached models (retrain only once a week)
-  • background training so the first request returns quickly
-  • lightweight inference (<3 s on Fly.io free tier)
+ml_model.py — LSTM forecast using yfinance (no API limits)
+  • Works for Indian stocks (RELIANCE.NS) and US stocks
+  • Disk-cached models — retrain once a week
+  • Background training for fast first response
+  • Prices in local currency (INR for Indian stocks)
 """
 import os, io, base64, warnings, threading
 from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
-import requests
+import yfinance as yf
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -22,23 +23,22 @@ from tensorflow.keras.callbacks import EarlyStopping
 
 warnings.filterwarnings("ignore")
 
-# ── Config ─────────────────────────────────────────────────────────────────
-POLYGON_API_KEY   = os.getenv("POLYGON_API_KEY", "Qp0JyguzyDhKjkM3BPpc7HO8LUVdM_a9")
+# ── Config ──────────────────────────────────────────────────────────────────
 MODEL_CACHE_DIR   = os.getenv("MODEL_CACHE_DIR", "model_cache")
 MODEL_EXPIRY_DAYS = int(os.getenv("MODEL_EXPIRY_DAYS", "7"))
-LOOKBACK          = 60          # trading days fed into LSTM
+LOOKBACK          = 60
 
 os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
 
-# Thread-safe set: symbols currently being trained in background
-_training_lock    = threading.Lock()
+_training_lock     = threading.Lock()
 _currently_training: set = set()
 
 
-# ── Cache helpers ───────────────────────────────────────────────────────────
+# ── Cache helpers ────────────────────────────────────────────────────────────
 
 def _paths(symbol: str) -> dict:
-    base = os.path.join(MODEL_CACHE_DIR, symbol.upper())
+    safe = symbol.replace(".", "_").upper()
+    base = os.path.join(MODEL_CACHE_DIR, safe)
     return {
         "model":  base + "_model.keras",
         "scaler": base + "_scaler.pkl",
@@ -72,30 +72,30 @@ def _load(symbol: str):
     return model, scaler
 
 
-# ── Data fetching ───────────────────────────────────────────────────────────
+# ── Data fetching via yfinance ───────────────────────────────────────────────
 
-def fetch_polygon_data(symbol: str) -> pd.DataFrame | None:
-    end   = datetime.now()
-    start = end - timedelta(days=365 * 5)
-    url   = (f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day"
-             f"/{start:%Y-%m-%d}/{end:%Y-%m-%d}")
-    res = requests.get(url, params={
-        "adjusted": "true", "sort": "asc",
-        "limit": 5000, "apiKey": POLYGON_API_KEY
-    }, timeout=15)
-    if res.status_code != 200:
-        print(f"Polygon error: {res.text}")
+def fetch_stock_data(symbol: str) -> pd.DataFrame | None:
+    """
+    Fetch 5 years of daily closing prices using yfinance.
+    Works for Indian stocks (RELIANCE.NS) and US stocks (AAPL).
+    """
+    try:
+        ticker = yf.Ticker(symbol)
+        df     = ticker.history(period="5y")
+        if df.empty:
+            print(f"[yfinance] No data for {symbol}")
+            return None
+        df = df.reset_index()
+        df.rename(columns={"Date": "ds", "Close": "y"}, inplace=True)
+        # Remove timezone info for consistency
+        df["ds"] = pd.to_datetime(df["ds"]).dt.tz_localize(None)
+        return df[["ds", "y"]].sort_values("ds").reset_index(drop=True)
+    except Exception as e:
+        print(f"[yfinance] Error fetching {symbol}: {e}")
         return None
-    data = res.json().get("results", [])
-    if not data:
-        return None
-    df = pd.DataFrame(data)
-    df["t"] = pd.to_datetime(df["t"], unit="ms")
-    df.rename(columns={"t": "ds", "c": "y"}, inplace=True)
-    return df[["ds", "y"]].sort_values("ds").reset_index(drop=True)
 
 
-# ── Model architecture ──────────────────────────────────────────────────────
+# ── LSTM helpers ─────────────────────────────────────────────────────────────
 
 def _build_sequences(scaled: np.ndarray):
     X, y = [], []
@@ -117,29 +117,27 @@ def _build_model() -> Sequential:
     return m
 
 
-# ── Training (can run in background thread) ─────────────────────────────────
+# ── Training ──────────────────────────────────────────────────────────────────
 
 def _train_and_save(symbol: str, df: pd.DataFrame):
-    """Full training pipeline. Safe to call from a background thread."""
     prices = df["y"].values.reshape(-1, 1)
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(prices)
     X, y   = _build_sequences(scaled)
-
-    split    = int(len(X) * 0.8)
-    model    = _build_model()
-    es       = EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True)
-    model.fit(X[:split], y[:split],
-              validation_data=(X[split:], y[split:]),
-              epochs=80, batch_size=32,
-              callbacks=[es], verbose=0)
+    split  = int(len(X) * 0.8)
+    model  = _build_model()
+    es     = EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True)
+    model.fit(
+        X[:split], y[:split],
+        validation_data=(X[split:], y[split:]),
+        epochs=80, batch_size=32,
+        callbacks=[es], verbose=0
+    )
     _save(symbol, model, scaler)
     with _training_lock:
         _currently_training.discard(symbol)
 
-
 def _spawn_training(symbol: str, df: pd.DataFrame):
-    """Start a background training thread if not already running."""
     with _training_lock:
         if symbol in _currently_training:
             return
@@ -149,31 +147,20 @@ def _spawn_training(symbol: str, df: pd.DataFrame):
     print(f"[BG] Training started for {symbol}")
 
 
-# ── Get-or-train ────────────────────────────────────────────────────────────
+# ── Get or train ──────────────────────────────────────────────────────────────
 
 def get_or_train_model(symbol: str, df: pd.DataFrame):
-    """
-    Returns (model, scaler, last_window) — always fast if cache exists.
-    If no cache: trains synchronously (first-ever request for that symbol).
-    If cache is stale: returns stale model immediately, retrains in background.
-    """
     prices = df["y"].values.reshape(-1, 1)
-
     if _is_fresh(symbol):
         model, scaler = _load(symbol)
         scaled        = scaler.transform(prices)
         return model, scaler, scaled[-LOOKBACK:, 0]
-
-    # Check if stale (files exist but expired)
     p = _paths(symbol)
     if all(os.path.exists(v) for v in p.values()):
-        # Return stale model now, retrain in background
         model, scaler = _load(symbol)
         scaled        = scaler.transform(prices)
-        _spawn_training(symbol, df)          # async retrain
+        _spawn_training(symbol, df)
         return model, scaler, scaled[-LOOKBACK:, 0]
-
-    # No model at all — train synchronously (unavoidable first time)
     print(f"[Train] First-time training for {symbol}…")
     _train_and_save(symbol, df)
     model, scaler = _load(symbol)
@@ -181,7 +168,7 @@ def get_or_train_model(symbol: str, df: pd.DataFrame):
     return model, scaler, scaled[-LOOKBACK:, 0]
 
 
-# ── Forecast helpers ────────────────────────────────────────────────────────
+# ── Forecast helpers ──────────────────────────────────────────────────────────
 
 def _forecast_days(model, last_window: np.ndarray, n_days: int, scaler) -> np.ndarray:
     win   = last_window.copy().reshape(1, LOOKBACK, 1)
@@ -199,10 +186,18 @@ def _ci(preds: np.ndarray, z: float = 1.65):
     return preds - delta, preds + delta
 
 
-# ── Public API ──────────────────────────────────────────────────────────────
+# ── Currency label ────────────────────────────────────────────────────────────
+
+def _currency(symbol: str) -> str:
+    if symbol.endswith(".NS") or symbol.endswith(".BO"):
+        return "₹"
+    return "$"
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def get_aggregated_forecast(symbol: str, forecast_type: str = "6m") -> pd.DataFrame | None:
-    df = fetch_polygon_data(symbol)
+    df = fetch_stock_data(symbol)
     if df is None or df.empty:
         return None
 
@@ -239,18 +234,23 @@ def generate_stock_plot(symbol: str, forecast_type: str = "6m") -> str | None:
     if fdf is None or fdf.empty:
         return None
 
-    fig, ax = plt.subplots(figsize=(10, 4.5), dpi=110)
+    cur     = _currency(symbol)
+    display = symbol.replace(".NS", "").replace(".BO", "")
     label   = "Monthly Avg" if forecast_type == "6m" else "Yearly Avg"
-    title   = (f"{symbol} — {'6-Month' if forecast_type=='6m' else '5-Year'} "
+    title   = (f"{display} — {'6-Month' if forecast_type=='6m' else '5-Year'} "
                f"LSTM Forecast ({label})")
 
+    fig, ax = plt.subplots(figsize=(10, 4.5), dpi=110)
     ax.plot(fdf["ds"], fdf["yhat"], marker="o", color="#6c5ce7", linewidth=2, label="Predicted")
     ax.fill_between(fdf["ds"], fdf["yhat_lower"], fdf["yhat_upper"],
                     alpha=0.25, color="#a29bfe", label="90% CI")
     ax.set_title(title, fontsize=14, fontweight="bold", pad=10)
-    ax.set_xlabel("Date"); ax.set_ylabel("Price (USD)")
-    ax.legend(fontsize=9); ax.grid(True, linestyle="--", alpha=0.6)
-    plt.xticks(rotation=35); plt.tight_layout()
+    ax.set_xlabel("Date")
+    ax.set_ylabel(f"Price ({cur})")
+    ax.legend(fontsize=9)
+    ax.grid(True, linestyle="--", alpha=0.6)
+    plt.xticks(rotation=35)
+    plt.tight_layout()
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")

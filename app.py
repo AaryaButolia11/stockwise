@@ -1,6 +1,6 @@
 """
 app.py — StockWise Flask application
-Features: LSTM forecasting, alerts, portfolio, login/logout, auto-sell
+Indian Nifty 50 stocks via yfinance (no API limits)
 """
 import os, csv
 import pandas as pd
@@ -15,38 +15,36 @@ import db
 import scheduler
 
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "change_me_in_production_please!")
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "change_me_in_production!")
 
-# ── Company list ────────────────────────────────────────────────────────────
+# ── Load Nifty 50 companies ─────────────────────────────────────────────────
 
 def load_companies():
-    path = os.path.join(os.path.dirname(__file__), "companies.csv")
+    # Load Indian stocks (primary)
     out  = []
+    path = os.path.join(os.path.dirname(__file__), "companies_india.csv")
     try:
         with open(path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 if "Symbol" in row and "Company" in row:
                     out.append((row["Symbol"], row["Company"]))
     except Exception as e:
-        print(f"[App] companies.csv error: {e}")
+        print(f"[App] companies_india.csv error: {e}")
     return out
 
 COMPANIES   = load_companies()
 COMPANY_MAP = {sym: name for sym, name in COMPANIES}
 
-# ── Start auto-sell scheduler ───────────────────────────────────────────────
 scheduler.start()
 
 
-# ── Auth helpers ────────────────────────────────────────────────────────────
+# ── Auth helpers ─────────────────────────────────────────────────────────────
 
 def login_required(f):
-    """Decorator — redirects to login if not logged in."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user_id" not in session:
-            # For API routes return JSON, for page routes redirect
-            if request.path.startswith("/api") or request.is_json or request.method == "POST":
+            if request.is_json or request.method == "POST":
                 return jsonify({"error": "Login required.", "redirect": "/login"}), 401
             return redirect(url_for("login_page"))
         return f(*args, **kwargs)
@@ -57,16 +55,16 @@ def current_user_id():
 
 
 # ══════════════════════════════════════════════════════════════════
-# AUTH PAGES
+# AUTH
 # ══════════════════════════════════════════════════════════════════
 
-@app.route("/login", methods=["GET"])
+@app.route("/login")
 def login_page():
     if "user_id" in session:
         return redirect(url_for("index"))
     return render_template("auth.html", page="login")
 
-@app.route("/register", methods=["GET"])
+@app.route("/register")
 def register_page():
     if "user_id" in session:
         return redirect(url_for("index"))
@@ -89,7 +87,6 @@ def api_register():
     if not ok:
         return jsonify({"error": result}), 400
 
-    # Auto login after register
     session["user_id"]  = result["id"]
     session["username"] = result["username"]
     session["email"]    = result["email"]
@@ -116,17 +113,17 @@ def api_login():
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
     session.clear()
-    return jsonify({"message": "Logged out successfully."})
+    return jsonify({"message": "Logged out."})
 
 @app.route("/api/me")
 def api_me():
     if "user_id" not in session:
-        return jsonify({"logged_in": False}), 200
+        return jsonify({"logged_in": False})
     return jsonify({
         "logged_in": True,
-        "user_id":  session["user_id"],
-        "username": session.get("username"),
-        "email":    session.get("email"),
+        "user_id":   session["user_id"],
+        "username":  session.get("username"),
+        "email":     session.get("email"),
     })
 
 
@@ -134,7 +131,7 @@ def api_me():
 # MAIN PAGE
 # ══════════════════════════════════════════════════════════════════
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 @login_required
 def index():
     return render_template("index.html",
@@ -156,10 +153,13 @@ def get_current_stock_info():
         price, _ = fetch_current_price(symbol)
         if price is None:
             return jsonify({"error": "Could not fetch price."}), 404
+        # Show ₹ for Indian stocks
+        currency = "₹" if symbol.endswith(".NS") or symbol.endswith(".BO") else "$"
         return jsonify({
             "symbol":        symbol,
             "company_name":  COMPANY_MAP.get(symbol, symbol),
             "current_price": f"{price:.2f}",
+            "currency":      currency,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -186,13 +186,15 @@ def get_forecast():
             return jsonify({"error": "Could not generate forecast."}), 500
         if not pd.api.types.is_datetime64_any_dtype(fdf["ds"]):
             fdf["ds"] = pd.to_datetime(fdf["ds"])
-        plot = generate_stock_plot(symbol, forecast_type)
+        plot     = generate_stock_plot(symbol, forecast_type)
+        currency = "₹" if symbol.endswith(".NS") or symbol.endswith(".BO") else "$"
         return jsonify({
             "dates":      fdf["ds"].dt.strftime("%Y-%m-%d").tolist(),
             "yhat":       fdf["yhat"].round(2).tolist(),
             "yhat_lower": fdf["yhat_lower"].round(2).tolist(),
             "yhat_upper": fdf["yhat_upper"].round(2).tolist(),
             "plot_img":   plot,
+            "currency":   currency,
         })
     except Exception as e:
         print(f"[Forecast] {symbol}: {e}")
@@ -250,19 +252,20 @@ def portfolio_buy():
     if price is None:
         return jsonify({"error": f"Could not fetch price for {symbol}."}), 400
 
-    company = COMPANY_MAP.get(symbol, symbol)
-    pid     = db.buy_stock(symbol, company, quantity, price,
-                           stop_loss, take_profit, phone, uid)
+    company  = COMPANY_MAP.get(symbol, symbol)
+    currency = "₹" if symbol.endswith(".NS") or symbol.endswith(".BO") else "$"
+    pid      = db.buy_stock(symbol, company, quantity, price,
+                            stop_loss, take_profit, phone, uid)
     if pid is None:
         return jsonify({"error": "Database error saving position."}), 500
 
     total = round(quantity * price, 2)
     if phone:
         send_alert_sms(phone,
-            f"StockWise Buy: {symbol} x{quantity} @ ${price:.2f} | Total: ${total}")
+            f"StockWise Buy: {symbol} x{quantity} @ {currency}{price:.2f} | Total: {currency}{total}")
 
     return jsonify({
-        "message":      f"Bought {quantity} x {symbol} @ ${price:.2f}",
+        "message":      f"Bought {quantity} x {symbol} @ {currency}{price:.2f}",
         "portfolio_id": pid,
         "symbol":       symbol,
         "quantity":     quantity,
@@ -270,6 +273,7 @@ def portfolio_buy():
         "total":        total,
         "stop_loss":    stop_loss,
         "take_profit":  take_profit,
+        "currency":     currency,
     })
 
 
@@ -292,7 +296,8 @@ def portfolio_sell():
     if not pos:
         return jsonify({"error": "Position not found or already closed."}), 404
 
-    symbol = pos["stock_symbol"]
+    symbol   = pos["stock_symbol"]
+    currency = "₹" if symbol.endswith(".NS") or symbol.endswith(".BO") else "$"
     price, _ = fetch_current_price(symbol)
     if price is None:
         return jsonify({"error": f"Could not fetch price for {symbol}."}), 400
@@ -306,13 +311,14 @@ def portfolio_sell():
 
     if pos.get("phone_number"):
         send_alert_sms(pos["phone_number"],
-            f"StockWise Sell: {symbol} @ ${price:.2f} | P&L: {sign}${pnl}")
+            f"StockWise Sell: {symbol} @ {currency}{price:.2f} | P&L: {sign}{currency}{pnl}")
 
     return jsonify({
-        "message":    f"Sold {pos['quantity']} x {symbol} @ ${price:.2f}",
+        "message":    f"Sold {pos['quantity']} x {symbol} @ {currency}{price:.2f}",
         "sell_price": price,
         "pnl":        pnl,
         "symbol":     symbol,
+        "currency":   currency,
     })
 
 
@@ -330,6 +336,8 @@ def portfolio_view():
     enriched = []
     for p in positions:
         row = dict(p)
+        sym = row.get("stock_symbol", "")
+        row["currency"] = "₹" if sym.endswith(".NS") or sym.endswith(".BO") else "$"
         if row["status"] == "open" and row.get("current_price") and row.get("buy_price"):
             row["unrealised_pnl"] = round(
                 (float(row["current_price"]) - float(row["buy_price"])) * float(row["quantity"]), 2

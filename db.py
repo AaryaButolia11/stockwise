@@ -1,24 +1,19 @@
 """
-db.py — PostgreSQL (Supabase) connection pool + all DB operations
+db.py — MySQL connection pool + all DB operations for StockWise
+Includes user auth (register/login) + user-scoped portfolio/alerts
 """
 import os
+from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
-import psycopg2
-from psycopg2 import pool, Error
-from psycopg2.extras import RealDictCursor
+import mysql.connector
+from mysql.connector import pooling, Error
 
 DB_CONFIG = {
     "host":     os.getenv("DB_HOST", "localhost"),
-    "user":     os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "dbname":   os.getenv("DB_NAME", "postgres"),
-    "port":     int(os.getenv("DB_PORT", "5432")),
-    "sslmode":  "require",
-    "connect_timeout": 10,
-    "keepalives": 1,
-    "keepalives_idle": 30,
-    "keepalives_interval": 10,
-    "keepalives_count": 5,
+    "user":     os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", "Aarya@123123"),
+    "database": os.getenv("DB_NAME", "stockwise_db"),
+    "port":     int(os.getenv("DB_PORT", "3306")),
 }
 
 _pool = None
@@ -26,54 +21,60 @@ _pool = None
 def get_pool():
     global _pool
     if _pool is None:
-        _pool = pool.ThreadedConnectionPool(1, 5, **DB_CONFIG)
+        _pool = pooling.MySQLConnectionPool(
+            pool_name="stockwise_pool",
+            pool_size=5,
+            **DB_CONFIG
+        )
     return _pool
 
 def get_conn():
-    return get_pool().getconn()
-
-def release_conn(conn):
-    get_pool().putconn(conn)
+    return get_pool().get_connection()
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────
 
-def register_user(username, email, password, phone=None):
-    conn = None
+def register_user(username: str, email: str, password: str, phone: str = None):
+    """
+    Create a new user. Returns (True, user_dict) or (False, error_message).
+    """
     try:
         conn = get_conn()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur  = conn.cursor(dictionary=True)
+        # Check duplicate
         cur.execute("SELECT id FROM users WHERE email=%s OR username=%s", (email, username))
         if cur.fetchone():
             return False, "Email or username already exists."
         hashed = generate_password_hash(password)
         cur.execute(
-            "INSERT INTO users (username, email, password_hash, phone_number) VALUES (%s,%s,%s,%s) RETURNING id",
+            "INSERT INTO users (username, email, password_hash, phone_number) VALUES (%s,%s,%s,%s)",
             (username, email, hashed, phone)
         )
-        uid = cur.fetchone()["id"]
         conn.commit()
+        uid = cur.lastrowid
         return True, {"id": uid, "username": username, "email": email, "phone_number": phone}
     except Error as e:
         print(f"[DB] register_user error: {e}")
-        if conn: conn.rollback()
         return False, "Database error during registration."
     finally:
-        if conn: release_conn(conn)
+        try: cur.close(); conn.close()
+        except: pass
 
 
-def login_user(email, password):
-    conn = None
+def login_user(email: str, password: str):
+    """
+    Verify credentials. Returns (True, user_dict) or (False, error_message).
+    """
     try:
         conn = get_conn()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur  = conn.cursor(dictionary=True)
         cur.execute("SELECT * FROM users WHERE email=%s", (email,))
         user = cur.fetchone()
         if not user:
             return False, "No account found with that email."
         if not check_password_hash(user["password_hash"], password):
             return False, "Incorrect password."
-        user = dict(user)
+        # Don't return password hash to the session
         user.pop("password_hash", None)
         if user.get("created_at"):
             user["created_at"] = str(user["created_at"])
@@ -82,32 +83,30 @@ def login_user(email, password):
         print(f"[DB] login_user error: {e}")
         return False, "Database error during login."
     finally:
-        if conn: release_conn(conn)
+        try: cur.close(); conn.close()
+        except: pass
 
 
-def get_user_by_id(user_id):
-    conn = None
+def get_user_by_id(user_id: int):
     try:
         conn = get_conn()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur  = conn.cursor(dictionary=True)
         cur.execute("SELECT id, username, email, phone_number, created_at FROM users WHERE id=%s", (user_id,))
         u = cur.fetchone()
-        if u:
-            u = dict(u)
-            if u.get("created_at"):
-                u["created_at"] = str(u["created_at"])
+        if u and u.get("created_at"):
+            u["created_at"] = str(u["created_at"])
         return u
     except Error as e:
         print(f"[DB] get_user_by_id error: {e}")
         return None
     finally:
-        if conn: release_conn(conn)
+        try: cur.close(); conn.close()
+        except: pass
 
 
 # ── Alerts ──────────────────────────────────────────────────────────────────
 
-def save_alert(stock_symbol, phone_number, user_id):
-    conn = None
+def save_alert(stock_symbol: str, phone_number: str, user_id: int) -> bool:
     try:
         conn = get_conn()
         cur  = conn.cursor()
@@ -119,40 +118,39 @@ def save_alert(stock_symbol, phone_number, user_id):
         return True
     except Error as e:
         print(f"[DB] save_alert error: {e}")
-        if conn: conn.rollback()
         return False
     finally:
-        if conn: release_conn(conn)
-
+        try: cur.close(); conn.close()
+        except: pass
 
 def get_all_alerts():
-    conn = None
     try:
         conn = get_conn()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur  = conn.cursor(dictionary=True)
         cur.execute("SELECT * FROM user_alerts WHERE is_active=TRUE")
-        return [dict(r) for r in cur.fetchall()]
+        return cur.fetchall()
     except Error as e:
         print(f"[DB] get_all_alerts error: {e}")
         return []
     finally:
-        if conn: release_conn(conn)
+        try: cur.close(); conn.close()
+        except: pass
 
 
 # ── Portfolio ────────────────────────────────────────────────────────────────
 
 def buy_stock(symbol, company, quantity, price, stop_loss, take_profit, phone, user_id):
-    conn = None
     try:
         conn = get_conn()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur  = conn.cursor()
         cur.execute("""
             INSERT INTO portfolio
               (user_id, stock_symbol, company_name, quantity, buy_price,
                current_price, stop_loss, take_profit, status, phone_number)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'open',%s) RETURNING id
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'open',%s)
         """, (user_id, symbol, company, quantity, price, price, stop_loss, take_profit, phone))
-        pid = cur.fetchone()["id"]
+        conn.commit()
+        pid = cur.lastrowid
         cur.execute("""
             INSERT INTO transactions (portfolio_id, action, stock_symbol, quantity, price, total_value, note)
             VALUES (%s,'buy',%s,%s,%s,%s,'Manual buy')
@@ -161,18 +159,17 @@ def buy_stock(symbol, company, quantity, price, stop_loss, take_profit, phone, u
         return pid
     except Error as e:
         print(f"[DB] buy_stock error: {e}")
-        if conn: conn.rollback()
         return None
     finally:
-        if conn: release_conn(conn)
+        try: cur.close(); conn.close()
+        except: pass
 
 
-def sell_stock(portfolio_id, sell_price, action="sell", user_id=None):
-    conn = None
+def sell_stock(portfolio_id: int, sell_price: float, action: str = "sell", user_id: int = None) -> bool:
     try:
         conn = get_conn()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
-        query  = "SELECT * FROM portfolio WHERE id=%s AND status='open'"
+        cur  = conn.cursor(dictionary=True)
+        query = "SELECT * FROM portfolio WHERE id=%s AND status='open'"
         params = [portfolio_id]
         if user_id:
             query += " AND user_id=%s"
@@ -187,6 +184,7 @@ def sell_stock(portfolio_id, sell_price, action="sell", user_id=None):
             SET status=%s, sold_at=NOW(), sell_price=%s, pnl=%s, current_price=%s
             WHERE id=%s
         """, (action, sell_price, pnl, sell_price, portfolio_id))
+        conn.commit()
         cur.execute("""
             INSERT INTO transactions (portfolio_id, action, stock_symbol, quantity, price, total_value, note)
             VALUES (%s,%s,%s,%s,%s,%s,%s)
@@ -196,48 +194,47 @@ def sell_stock(portfolio_id, sell_price, action="sell", user_id=None):
         return True
     except Error as e:
         print(f"[DB] sell_stock error: {e}")
-        if conn: conn.rollback()
         return False
     finally:
-        if conn: release_conn(conn)
+        try: cur.close(); conn.close()
+        except: pass
 
 
-def get_open_positions(user_id=None):
-    conn = None
+def get_open_positions(user_id: int = None):
     try:
         conn = get_conn()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur  = conn.cursor(dictionary=True)
         if user_id:
             cur.execute("SELECT * FROM portfolio WHERE status='open' AND user_id=%s ORDER BY bought_at DESC", (user_id,))
         else:
             cur.execute("SELECT * FROM portfolio WHERE status='open' ORDER BY bought_at DESC")
-        return [dict(r) for r in cur.fetchall()]
+        return cur.fetchall()
     except Error as e:
         print(f"[DB] get_open_positions error: {e}")
         return []
     finally:
-        if conn: release_conn(conn)
+        try: cur.close(); conn.close()
+        except: pass
 
 
-def get_all_positions(user_id=None):
-    conn = None
+def get_all_positions(user_id: int = None):
     try:
         conn = get_conn()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur  = conn.cursor(dictionary=True)
         if user_id:
             cur.execute("SELECT * FROM portfolio WHERE user_id=%s ORDER BY bought_at DESC", (user_id,))
         else:
             cur.execute("SELECT * FROM portfolio ORDER BY bought_at DESC")
-        return [dict(r) for r in cur.fetchall()]
+        return cur.fetchall()
     except Error as e:
         print(f"[DB] get_all_positions error: {e}")
         return []
     finally:
-        if conn: release_conn(conn)
+        try: cur.close(); conn.close()
+        except: pass
 
 
-def update_current_price(portfolio_id, price):
-    conn = None
+def update_current_price(portfolio_id: int, price: float):
     try:
         conn = get_conn()
         cur  = conn.cursor()
@@ -245,21 +242,20 @@ def update_current_price(portfolio_id, price):
         conn.commit()
     except Error as e:
         print(f"[DB] update_current_price error: {e}")
-        if conn: conn.rollback()
     finally:
-        if conn: release_conn(conn)
+        try: cur.close(); conn.close()
+        except: pass
 
 
-def get_portfolio_summary(user_id=None):
-    conn = None
+def get_portfolio_summary(user_id: int = None):
     try:
         conn = get_conn()
-        cur  = conn.cursor(cursor_factory=RealDictCursor)
+        cur  = conn.cursor(dictionary=True)
         if user_id:
             cur.execute("""
                 SELECT
-                    COUNT(*) FILTER (WHERE status='open')  AS open_count,
-                    COUNT(*) FILTER (WHERE status!='open') AS closed_count,
+                    SUM(status='open')  AS open_count,
+                    SUM(status!='open') AS closed_count,
                     COALESCE(SUM(CASE WHEN status='open' THEN quantity*buy_price END),0) AS invested,
                     COALESCE(SUM(pnl),0) AS total_pnl
                 FROM portfolio WHERE user_id=%s
@@ -267,16 +263,16 @@ def get_portfolio_summary(user_id=None):
         else:
             cur.execute("""
                 SELECT
-                    COUNT(*) FILTER (WHERE status='open')  AS open_count,
-                    COUNT(*) FILTER (WHERE status!='open') AS closed_count,
+                    SUM(status='open')  AS open_count,
+                    SUM(status!='open') AS closed_count,
                     COALESCE(SUM(CASE WHEN status='open' THEN quantity*buy_price END),0) AS invested,
                     COALESCE(SUM(pnl),0) AS total_pnl
                 FROM portfolio
             """)
-        r = cur.fetchone()
-        return dict(r) if r else {}
+        return cur.fetchone()
     except Error as e:
         print(f"[DB] get_portfolio_summary error: {e}")
         return {}
     finally:
-        if conn: release_conn(conn)
+        try: cur.close(); conn.close()
+        except: pass
