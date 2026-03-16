@@ -50,46 +50,107 @@ def load_nifty50():
 
 # ── Fast batch data fetch ─────────────────────────────────────────────────────
 
+TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_KEY", "")
+
+def _to_td_symbol(symbol: str) -> str:
+    if symbol.endswith(".NS"): return symbol.replace(".NS", "") + ":NSE"
+    if symbol.endswith(".BO"): return symbol.replace(".BO", "") + ":BSE"
+    return symbol
+
+def _batch_fetch_twelvedata(symbols: list, period: str = "30d") -> dict:
+    """
+    Fetch all symbols from Twelve Data in parallel threads.
+    Free plan: 800 req/day, 8 req/min — throttled accordingly.
+    """
+    import requests as _req, time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not TWELVE_DATA_KEY:
+        return {}
+
+    outputsize = 30 if period == "30d" else 5
+
+    def fetch_one(sym):
+        try:
+            td_sym = _to_td_symbol(sym)
+            url    = (
+                f"https://api.twelvedata.com/time_series"
+                f"?symbol={td_sym}&interval=1day&outputsize={outputsize}"
+                f"&apikey={TWELVE_DATA_KEY}&format=JSON"
+            )
+            resp = _req.get(url, timeout=10)
+            data = resp.json()
+            if data.get("status") == "error":
+                return sym, None
+            rows = data.get("values", [])
+            if not rows:
+                return sym, None
+            df = pd.DataFrame(rows)
+            df["Date"]   = pd.to_datetime(df["datetime"])
+            df["Open"]   = df["open"].astype(float)
+            df["High"]   = df["high"].astype(float)
+            df["Low"]    = df["low"].astype(float)
+            df["Close"]  = df["close"].astype(float)
+            df["Volume"] = df["volume"].astype(float)
+            df = df.set_index("Date").sort_index()
+            return sym, df
+        except Exception as e:
+            print(f"[TwelveData] {sym}: {e}")
+            return sym, None
+
+    result = {}
+    batch_size = 8
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i:i+batch_size]
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = {ex.submit(fetch_one, s): s for s in batch}
+            for fut in as_completed(futures):
+                sym, df = fut.result()
+                if df is not None and not df.empty:
+                    result[sym] = df
+        if i + batch_size < len(symbols):
+            time.sleep(60)
+
+    print(f"[TwelveData] Fetched {len(result)}/{len(symbols)} symbols")
+    return result
+
+
 def _batch_fetch(symbols: list, period: str = "30d") -> dict:
     """
-    Download all symbols in ONE yfinance call — far faster than one-by-one.
-    Returns dict: symbol -> DataFrame
+    Fetch all symbols — Twelve Data first, yfinance as fallback.
     """
     if not symbols:
         return {}
+
+    result = _batch_fetch_twelvedata(symbols, period)
+    if result:
+        return result
+
+    print("[Recommender] Twelve Data empty, falling back to yfinance...")
     import time
     for attempt in range(3):
         try:
             raw = yf.download(
-                tickers=symbols,
-                period=period,
-                interval="1d",
-                group_by="ticker",
-                auto_adjust=True,
-                progress=False,
-                threads=True,
+                tickers=symbols, period=period, interval="1d",
+                group_by="ticker", auto_adjust=True,
+                progress=False, threads=True,
             )
-            result = {}
+            fb = {}
             if len(symbols) == 1:
-                sym = symbols[0]
-                if not raw.empty:
-                    result[sym] = raw
+                if not raw.empty: fb[symbols[0]] = raw
             else:
                 for sym in symbols:
                     try:
                         df = raw[sym].dropna(how="all")
-                        if not df.empty:
-                            result[sym] = df
+                        if not df.empty: fb[sym] = df
                     except Exception:
                         pass
-            if result:
-                return result
-            print(f"[Recommender] Empty result attempt {attempt+1}, retrying...")
+            if fb:
+                return fb
             time.sleep(2)
         except Exception as e:
-            print(f"[Recommender] Batch fetch error attempt {attempt+1}: {e}")
-            if attempt < 2:
-                time.sleep(2)
+            print(f"[yfinance] Batch attempt {attempt+1}: {e}")
+            if attempt < 2: time.sleep(2)
     return {}
 
 
@@ -136,7 +197,6 @@ def _volume_score(hist: pd.DataFrame) -> float:
 
 
 def _gap_score(hist: pd.DataFrame) -> float:
-    """Gap-up open = buying interest."""
     if len(hist) < 2:
         return 50.0
     try:
@@ -149,10 +209,6 @@ def _gap_score(hist: pd.DataFrame) -> float:
 
 
 def _estimate_gain(hist: pd.DataFrame) -> float:
-    """
-    Fast trend-based gain estimate using linear regression on last 10 days.
-    No ML — runs in microseconds. Replaces slow LSTM for recommendations.
-    """
     if len(hist) < 10:
         return 0.0
     try:
@@ -160,7 +216,7 @@ def _estimate_gain(hist: pd.DataFrame) -> float:
         x         = np.arange(len(closes))
         slope, intercept = np.polyfit(x, closes, 1)
         current   = closes[-1]
-        predicted = intercept + slope * (len(closes) + 4)   # 5 days ahead
+        predicted = intercept + slope * (len(closes) + 4)
         gain      = ((predicted - current) / current) * 100
         return float(round(gain, 2))
     except Exception:
@@ -223,7 +279,6 @@ def _score_from_hist(symbol: str, company: str, hist: pd.DataFrame):
 def generate_recommendations() -> list:
     """
     Score all Nifty 50 in < 15 seconds using batch fetch + parallel scoring.
-    No LSTM training — that happens only on-demand in /get_forecast.
     """
     print(f"[Recommender] Fast recommendations for {date.today()}...")
     stocks = load_nifty50()
@@ -234,12 +289,10 @@ def generate_recommendations() -> list:
     symbols     = [s for s, _ in stocks]
     company_map = {s: c for s, c in stocks}
 
-    # One HTTP round-trip for all 50 symbols
     print(f"[Recommender] Batch fetching {len(symbols)} symbols...")
     hist_map = _batch_fetch(symbols, period="30d")
     print(f"[Recommender] Got data for {len(hist_map)}/{len(symbols)} symbols.")
 
-    # Score in parallel
     results = []
     with ThreadPoolExecutor(max_workers=10) as ex:
         futures = {
@@ -260,7 +313,7 @@ def generate_recommendations() -> list:
     for i, r in enumerate(top5):
         r["rank"] = i + 1
 
-    print(f"[Recommender] Done in fast mode. Top 5: {[r['symbol'] for r in top5]}")
+    print(f"[Recommender] Done. Top 5: {[r['symbol'] for r in top5]}")
     return top5
 
 
@@ -280,6 +333,7 @@ def score_stock(symbol: str, company: str):
 
 def save_recommendations(recommendations: list):
     import db
+    conn = cur = None
     try:
         conn  = db.get_conn()
         cur   = conn.cursor()
@@ -300,36 +354,43 @@ def save_recommendations(recommendations: list):
         print(f"[Recommender] Saved {len(recommendations)} recommendations.")
         return True
     except Exception as e:
+        if conn: conn.rollback()
         print(f"[Recommender] DB save error: {e}")
         traceback.print_exc()
         return False
     finally:
-        try: cur.close(); conn.close()
-        except: pass
+        if cur:  cur.close()
+        if conn: db.release_conn(conn)
 
 
 def get_todays_recommendations() -> list:
     """Fetch today's cached recommendations — instant DB read."""
     import db
+    import psycopg2.extras
+    conn = cur = None
     try:
         conn = db.get_conn()
-        cur  = conn.cursor(dictionary=True)
+        cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # PostgreSQL uses CURRENT_DATE (not MySQL's CURDATE())
         cur.execute("""
             SELECT * FROM ai_recommendations
-            WHERE date = CURDATE()
+            WHERE date = CURRENT_DATE
             ORDER BY rank ASC
         """)
         rows = cur.fetchall()
+        result = []
         for r in rows:
-            if r.get("date"):       r["date"]       = str(r["date"])
-            if r.get("created_at"): r["created_at"] = str(r["created_at"])
-        return rows
+            row = dict(r)
+            if row.get("date"):       row["date"]       = str(row["date"])
+            if row.get("created_at"): row["created_at"] = str(row["created_at"])
+            result.append(row)
+        return result
     except Exception as e:
         print(f"[Recommender] DB fetch error: {e}")
         return []
     finally:
-        try: cur.close(); conn.close()
-        except: pass
+        if cur:  cur.close()
+        if conn: db.release_conn(conn)
 
 
 def track_daily_prices():
@@ -345,28 +406,33 @@ def track_daily_prices():
         hist = hist_map.get(symbol)
         if hist is None or hist.empty:
             continue
+        conn = cur = None
         try:
             row  = hist.iloc[-1]
             conn = db.get_conn()
             cur  = conn.cursor()
+            # PostgreSQL upsert — replaces MySQL's ON DUPLICATE KEY UPDATE
             cur.execute("""
                 INSERT INTO daily_prices
                   (date, stock_symbol, open_price, close_price, high_price, low_price, volume, pct_change)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                ON DUPLICATE KEY UPDATE
-                  close_price=VALUES(close_price),
-                  high_price=VALUES(high_price),
-                  low_price=VALUES(low_price),
-                  volume=VALUES(volume),
-                  pct_change=VALUES(pct_change)
+                ON CONFLICT (date, stock_symbol) DO UPDATE SET
+                  close_price = EXCLUDED.close_price,
+                  high_price  = EXCLUDED.high_price,
+                  low_price   = EXCLUDED.low_price,
+                  volume      = EXCLUDED.volume,
+                  pct_change  = EXCLUDED.pct_change
             """, (
                 today, symbol,
-                float(row["Open"]),   float(row["Close"]),
-                float(row["High"]),   float(row["Low"]),
+                float(row["Open"]),  float(row["Close"]),
+                float(row["High"]),  float(row["Low"]),
                 int(row["Volume"]),
                 round(((float(row["Close"]) - float(row["Open"])) / float(row["Open"])) * 100, 2)
             ))
             conn.commit()
-            cur.close(); conn.close()
         except Exception as e:
+            if conn: conn.rollback()
             print(f"[Prices] Error tracking {symbol}: {e}")
+        finally:
+            if cur:  cur.close()
+            if conn: db.release_conn(conn)
