@@ -330,4 +330,3 @@ def generate_stock_plot(symbol: str, forecast_type: str = "6m") -> str | None:
     plt.close(fig)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode()
-    
