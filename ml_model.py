@@ -81,11 +81,28 @@ def fetch_stock_data(symbol: str) -> pd.DataFrame | None:
     df = fetch_history(symbol, days=1825)   # ~5 years
     if df is None or df.empty:
         return None
-    # Ensure ds/y columns
+
+    # Ensure ds/y columns exist (data_fetch already sets them, but be safe)
     if "ds" not in df.columns:
         df = df.reset_index()
         df.rename(columns={"Date": "ds", "Close": "y"}, inplace=True)
-    df["ds"] = pd.to_datetime(df["ds"]).dt.tz_localize(None)
+
+    # Safely strip timezone — handle both tz-aware and tz-naive
+    def _strip_tz(s: pd.Series) -> pd.Series:
+        s = pd.to_datetime(s, errors="coerce")
+        if s.dt.tz is not None:
+            return s.dt.tz_convert(None)
+        return s
+
+    df["ds"] = _strip_tz(df["ds"])
+    df["y"]  = pd.to_numeric(df["y"], errors="coerce")
+    df = df.dropna(subset=["ds", "y"])
+    df = df[df["y"] > 0]   # drop zero/negative prices
+
+    if len(df) < LOOKBACK + 10:
+        print(f"[LSTM] {symbol}: not enough data ({len(df)} rows, need {LOOKBACK + 10})")
+        return None
+
     return df[["ds", "y"]].sort_values("ds").reset_index(drop=True)
 
 
