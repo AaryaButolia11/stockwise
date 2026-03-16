@@ -1,9 +1,9 @@
 FROM python:3.11-slim
 
-# System deps for TensorFlow + MySQL
+# System deps for TensorFlow + PostgreSQL (psycopg2)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ libgomp1 pkg-config \
-    default-libmysqlclient-dev \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -15,10 +15,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY . .
 
-# Create model cache dir (mapped to Fly volume in production)
-RUN mkdir -p model_cache
+# Create model cache dir
+# On Render: mount a Disk at /data, set MODEL_CACHE_DIR=/data/model_cache
+# On free tier (no disk): defaults to /tmp/model_cache (wiped on redeploy)
+RUN mkdir -p /tmp/model_cache
 
 EXPOSE 8080
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", \
-     "--timeout", "300", "--keep-alive", "5", "app:app"]
+# Single worker + threads avoids duplicate scheduler runs
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", \
+     "--threads", "4", "--timeout", "300", "--keep-alive", "5", "app:app"]
