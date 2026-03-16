@@ -180,34 +180,61 @@ def _history_stooq(symbol: str, days: int = 365) -> pd.DataFrame | None:
     try:
         from datetime import date, timedelta
         stooq_sym  = to_stooq_symbol(symbol)
-        start_date = (date.today() - timedelta(days=days + 60)).strftime("%Y%m%d")
+        # Request extra days to account for weekends/holidays
+        start_date = (date.today() - timedelta(days=int(days * 1.5) + 90)).strftime("%Y%m%d")
         end_date   = date.today().strftime("%Y%m%d")
         url = (f"https://stooq.com/q/d/l/?s={stooq_sym}"
                f"&d1={start_date}&d2={end_date}&i=d")
-        resp = requests.get(url, timeout=15,
-                            headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(url, timeout=20,
+                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         if resp.status_code != 200:
+            print(f"[Stooq hist] {symbol}: HTTP {resp.status_code}")
             return None
         text = resp.text.strip()
-        if not text or "No data" in text or len(text) < 50:
+        if not text or "No data" in text or len(text) < 30:
+            print(f"[Stooq hist] {symbol}: empty response")
             return None
+
         df = pd.read_csv(StringIO(text))
-        if df.empty or "Close" not in df.columns:
+        if df.empty:
             return None
-        df["Date"] = pd.to_datetime(df["Date"])
+
+        # Normalize column names to Title Case (Stooq returns mixed case)
+        df.columns = [c.strip().title() for c in df.columns]
+
+        if "Close" not in df.columns or "Date" not in df.columns:
+            print(f"[Stooq hist] {symbol}: missing columns: {list(df.columns)}")
+            return None
+
+        # Parse date and set as index
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.dropna(subset=["Date"])
         df = df.set_index("Date").sort_index()
-        df.columns = [c.capitalize() for c in df.columns]
-        # Ensure standard column names
+
+        # Ensure all standard OHLCV columns exist
         for col in ["Open", "High", "Low", "Close", "Volume"]:
             if col not in df.columns:
-                df[col] = df.get(col.lower(), 0)
+                df[col] = df["Close"]  # fallback to close
+
+        df["Close"]  = pd.to_numeric(df["Close"],  errors="coerce")
+        df["Open"]   = pd.to_numeric(df["Open"],   errors="coerce")
+        df["High"]   = pd.to_numeric(df["High"],   errors="coerce")
+        df["Low"]    = pd.to_numeric(df["Low"],    errors="coerce")
+        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
+        df = df.dropna(subset=["Close"])
+
+        # ds/y columns for LSTM compatibility — strip timezone safely
+        idx = df.index
+        if hasattr(idx, "tz") and idx.tz is not None:
+            idx = idx.tz_convert(None)
+        else:
+            idx = idx.tz_localize(None) if idx.tzinfo is not None else idx  # type: ignore
+        df.index = idx
         df["ds"] = df.index
         df["y"]  = df["Close"]
+
         print(f"[Stooq hist] {symbol}: {len(df)} rows")
-        return df.tail(days)
-    except Exception as e:
-        print(f"[Stooq hist] {symbol}: {e}")
-    return None
+        return df
 
 
 def fetch_history(symbol: str, days: int = 365) -> pd.DataFrame | None:
