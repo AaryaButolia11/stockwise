@@ -235,6 +235,9 @@ def _history_stooq(symbol: str, days: int = 365) -> pd.DataFrame | None:
 
         print(f"[Stooq hist] {symbol}: {len(df)} rows")
         return df
+    except Exception as e:
+        print(f"[Stooq hist] {symbol}: {e}")
+    return None
 
 
 def fetch_history(symbol: str, days: int = 365) -> pd.DataFrame | None:
