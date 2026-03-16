@@ -1,135 +1,26 @@
 # msg.py — price fetching + Twilio alerts
-# Price source priority:
-#   1. Twelve Data API  (reliable on cloud, needs TWELVE_DATA_KEY)
-#   2. NSE India public API  (free, no key, works on cloud, India stocks only)
-#   3. yfinance  (often rate-limited on cloud IPs — last resort)
+# Price fetching delegated to data_fetch.py (Twelve Data → NSE → Stooq)
 
 import os
 import requests
-import yfinance as yf
 from twilio.rest import Client
 from data_fetch import fetch_price as _df_fetch_price
 
-# ── Twilio — read at import time is fine, these don't change ────────────────
-account_sid            = os.getenv("TWILIO_ACCOUNT_SID")
-auth_token             = os.getenv("TWILIO_AUTH_TOKEN")
-twilio_sms_number      = os.getenv("TWILIO_SMS_NUMBER")
-twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+# All credentials read lazily inside functions — so updating env vars on
+# Render/Railway takes effect on next call without a full redeploy.
 
-# NOTE: API keys are read inside functions (lazy) so Render env vars added
-# after deploy are always picked up without a restart.
-
-client = Client(account_sid, auth_token)
+def _twilio_client():
+    sid   = os.getenv("TWILIO_ACCOUNT_SID", "")
+    token = os.getenv("TWILIO_AUTH_TOKEN", "")
+    if not sid or not token:
+        return None
+    try:
+        return Client(sid, token)
+    except Exception as e:
+        print(f"[Twilio] Client init error: {e}")
+        return None
 
 # ── Symbol helpers ──────────────────────────────────────────────────────────
-
-def _to_td_symbol(symbol: str) -> str:
-    """Convert yfinance symbol to Twelve Data format."""
-    if symbol.endswith(".NS"): return symbol.replace(".NS", "") + ":NSE"
-    if symbol.endswith(".BO"): return symbol.replace(".BO", "") + ":BSE"
-    return symbol
-
-def _to_nse_symbol(symbol: str) -> str:
-    """
-    Convert yfinance symbol to NSE ticker.
-    e.g. RELIANCE.NS -> RELIANCE, M&M.NS -> M%26M (URL-encoded)
-    """
-    sym = symbol.replace(".NS", "").replace(".BO", "")
-    return sym  # requests handles URL encoding automatically
-
-
-# ── Price source 1: Twelve Data ─────────────────────────────────────────────
-
-def _fetch_twelvedata(symbol: str) -> float | None:
-    key = os.getenv("TWELVE_DATA_KEY", "")   # lazy read every call
-    if not key:
-        return None
-    try:
-        td_sym = _to_td_symbol(symbol)
-        url    = f"https://api.twelvedata.com/price?symbol={td_sym}&apikey={key}"
-        resp   = requests.get(url, timeout=8)
-        data   = resp.json()
-        if "price" in data:
-            price = float(data["price"])
-            if price > 0:
-                print(f"[TwelveData] {symbol} = {price}")
-                return price
-        print(f"[TwelveData] No price for {symbol}: {data.get('message','unknown error')}")
-    except Exception as e:
-        print(f"[TwelveData] Error for {symbol}: {e}")
-    return None
-
-
-# ── Price source 2: NSE India public API (no key, India stocks only) ────────
-
-def _fetch_nse(symbol: str) -> float | None:
-    """
-    Uses NSE India's public quote API.
-    Only works for .NS stocks. Returns None for US/other symbols.
-    """
-    if not (symbol.endswith(".NS") or symbol.endswith(".BO")):
-        return None
-    try:
-        nse_sym = _to_nse_symbol(symbol)
-        session = requests.Session()
-        # NSE requires a cookie from the main page first
-        session.get(
-            "https://www.nseindia.com",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=5
-        )
-        url  = f"https://www.nseindia.com/api/quote-equity?symbol={nse_sym}"
-        resp = session.get(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                "Accept": "application/json",
-                "Referer": "https://www.nseindia.com/",
-            },
-            timeout=8,
-        )
-        data  = resp.json()
-        price = (
-            data.get("priceInfo", {}).get("lastPrice") or
-            data.get("priceInfo", {}).get("close")
-        )
-        if price and float(price) > 0:
-            print(f"[NSE] {symbol} = {price}")
-            return float(price)
-    except Exception as e:
-        print(f"[NSE] Error for {symbol}: {e}")
-    return None
-
-
-# ── Price source 3: yfinance (last resort, often blocked on cloud) ───────────
-
-def _fetch_yfinance(symbol: str) -> float | None:
-    import time
-    # yfinance often blocks .NS symbols on cloud — try with a browser UA
-    yf.utils.requests = requests.Session()
-    yf.utils.requests.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    })
-    for attempt in range(2):
-        try:
-            ticker = yf.Ticker(symbol)
-            try:
-                p = ticker.fast_info.last_price
-                if p and float(p) > 0:
-                    return float(p)
-            except Exception:
-                pass
-            hist = ticker.history(period="2d")
-            if not hist.empty:
-                return float(hist["Close"].iloc[-1])
-        except Exception as e:
-            print(f"[yfinance] Attempt {attempt+1} for {symbol}: {e}")
-            if attempt < 1:
-                time.sleep(1)
-    return None
-
-
-# ── Public interface ─────────────────────────────────────────────────────────
 
 def fetch_current_price(symbol: str) -> tuple:
     """
@@ -142,36 +33,43 @@ def fetch_current_price(symbol: str) -> tuple:
 # ── SMS ──────────────────────────────────────────────────────────────────────
 
 def send_alert_sms(to_phone_number: str, message: str) -> bool:
-    if not all([account_sid, auth_token, twilio_sms_number]):
-        print("Twilio SMS credentials not set.")
+    sid    = os.getenv("TWILIO_ACCOUNT_SID", "")
+    sms_from = os.getenv("TWILIO_SMS_NUMBER", "")
+    if not sid or not sms_from:
+        print("[Twilio] SMS credentials not set.")
+        return False
+    client = _twilio_client()
+    if not client:
         return False
     try:
         resp = client.messages.create(
-            body=message, from_=twilio_sms_number, to=to_phone_number
+            body=message, from_=sms_from, to=to_phone_number
         )
-        print(f"SMS sent: {resp.sid}")
+        print(f"[SMS] Sent to {to_phone_number}: {resp.sid}")
         return True
     except Exception as e:
-        print(f"SMS error to {to_phone_number}: {e}")
+        print(f"[SMS] Error to {to_phone_number}: {e}")
         return False
 
 
 # ── WhatsApp ─────────────────────────────────────────────────────────────────
 
 def send_alert_whatsapp(to_number: str, message: str) -> bool:
-    if not all([account_sid, auth_token, twilio_whatsapp_number]):
-        print("Twilio WhatsApp credentials not set.")
+    wa_from = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+    client  = _twilio_client()
+    if not client:
+        print("[Twilio] WhatsApp credentials not set.")
         return False
     if not to_number.startswith("whatsapp:"):
         to_number = "whatsapp:" + to_number
     try:
         resp = client.messages.create(
-            body=message, from_=twilio_whatsapp_number, to=to_number
+            body=message, from_=wa_from, to=to_number
         )
-        print(f"WhatsApp sent: {resp.sid}")
+        print(f"[WhatsApp] Sent to {to_number}: {resp.sid}")
         return True
     except Exception as e:
-        print(f"WhatsApp error to {to_number}: {e}")
+        print(f"[WhatsApp] Error to {to_number}: {e}")
         return False
 
 
