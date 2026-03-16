@@ -1,33 +1,31 @@
 """
 db.py — PostgreSQL (Supabase) connection pool + all DB operations for StockWise
-Schema matches exactly what's in Supabase (rank column, no unique on ai_recommendations).
 Works with:
-  • Supabase (cloud) — set DATABASE_URL in .env
+  • Supabase (cloud) — set DATABASE_URL in Render environment variables
   • Local PostgreSQL  — set DB_HOST, DB_USER, etc. in .env
 """
 import os
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=True)
+
 from werkzeug.security import generate_password_hash, check_password_hash
 import psycopg2
 import psycopg2.pool
 import psycopg2.extras
 
 # ── DSN builder ───────────────────────────────────────────────────────────────
-DATABASE_URL = os.getenv("DATABASE_URL")
 
-# ✅ NEW — reads env inside the function, called lazily when first connection is made
 def _build_dsn():
-    database_url = os.getenv("DATABASE_URL")   # reads AFTER load_dotenv ran
-    if database_url:   # now correctly finds your Supabase URL
-        dsn = DATABASE_URL
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        dsn = database_url
         if "sslmode" not in dsn:
             dsn += ("&" if "?" in dsn else "?") + "sslmode=require"
         return dsn
     return (
         f"host={os.getenv('DB_HOST','localhost')} "
         f"port={os.getenv('DB_PORT','5432')} "
-        f"dbname={os.getenv('DB_NAME','stockwise_db')} "
+        f"dbname={os.getenv('DB_NAME','postgres')} "
         f"user={os.getenv('DB_USER','postgres')} "
         f"password={os.getenv('DB_PASSWORD','')} "
         f"sslmode={os.getenv('DB_SSLMODE','require')}"
