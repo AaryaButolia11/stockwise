@@ -153,7 +153,11 @@ def get_current_stock_info():
     try:
         price, _ = fetch_current_price(symbol)
         if price is None:
-            return jsonify({"error": "Could not fetch price."}), 404
+            has_td = bool(__import__("os").getenv("TWELVE_DATA_KEY", ""))
+            msg = ("Price unavailable. TWELVE_DATA_KEY not set — yfinance is rate-limited on cloud."
+                   if not has_td else
+                   "All price sources failed. Market may be closed or symbol delisted.")
+            return jsonify({"error": msg}), 404
         # Show ₹ for Indian stocks
         currency = "₹" if symbol.endswith(".NS") or symbol.endswith(".BO") else "$"
         return jsonify({
@@ -366,35 +370,54 @@ def portfolio_view():
 # ══════════════════════════════════════════════════════════════════
 
 import threading as _threading
-_reco_generating = False   # global flag — prevents duplicate background jobs
+import datetime as _dt
 
-def _generate_and_save_bg():
-    """Run recommendation generation in background thread."""
-    global _reco_generating
+_reco_generating  = False   # is a generation job running right now?
+_reco_last_error  = None    # last error message, if any
+_reco_started_at  = None    # when the current job started (for timeout detection)
+
+
+def _generate_and_save_bg(broadcast_sms: bool = False):
+    """
+    Run recommendation generation in a background thread.
+    Optionally broadcasts SMS to all registered users when done.
+    """
+    global _reco_generating, _reco_last_error, _reco_started_at
+    _reco_last_error = None
     try:
         from recommender import generate_recommendations, save_recommendations
         recs = generate_recommendations()
         if recs:
             save_recommendations(recs)
-        print(f"[App] Background recommendations done: {len(recs)} saved.")
+            print(f"[App] Background recommendations done: {len(recs)} saved.")
+            if broadcast_sms:
+                try:
+                    from scheduler import _broadcast_recommendations
+                    _broadcast_recommendations(recs)
+                except Exception as sms_err:
+                    print(f"[App] SMS broadcast error: {sms_err}")
+        else:
+            _reco_last_error = "No data returned from market APIs. Try again in a few minutes."
+            print(f"[App] No recommendations generated.")
     except Exception as e:
+        _reco_last_error = str(e)
         print(f"[App] Background recommendation error: {e}")
     finally:
         _reco_generating = False
+        _reco_started_at = None
 
 
 @app.route("/recommendations")
 @login_required
 def get_recommendations():
     """
-    Get today's top 5 AI recommended stocks.
-    • If cached in DB  → return instantly (< 5 ms).
-    • If not cached    → start background generation, return empty list
-                         with generating=True so the UI can poll again.
-    Never blocks the HTTP request with slow computation.
+    GET today's top 5 AI picks.
+    Returns:
+      generating: true  → job is running, client should poll every 5s
+      generating: false + recommendations → ready
+      generating: false + error → something went wrong
     """
-    global _reco_generating
-    import datetime as _dt
+    global _reco_generating, _reco_last_error
     try:
         from recommender import get_todays_recommendations
         recs = get_todays_recommendations()
@@ -402,22 +425,25 @@ def get_recommendations():
         if recs:
             return jsonify({
                 "recommendations": recs,
-                "date": str(_dt.date.today()),
-                "generating": False,
+                "date":            str(_dt.date.today()),
+                "generating":      False,
+                "count":           len(recs),
             })
 
-        # No cache → kick off background job if not already running
+        # Nothing in DB yet — auto-start a background job on first visit
         if not _reco_generating:
-            _reco_generating = True
+            _reco_generating  = True
+            _reco_started_at  = _dt.datetime.utcnow()
             t = _threading.Thread(target=_generate_and_save_bg, daemon=True)
             t.start()
-            print("[App] Started background recommendation generation.")
+            print("[App] Auto-started background recommendation generation.")
 
         return jsonify({
             "recommendations": [],
-            "date": str(_dt.date.today()),
-            "generating": True,
-            "message": "Recommendations are being generated. Please check back in ~30 seconds.",
+            "date":            str(_dt.date.today()),
+            "generating":      True,
+            "error":           _reco_last_error,
+            "message":         "Generating recommendations… this takes ~20-30 seconds.",
         })
     except Exception as e:
         print(f"[Recommendations] Error: {e}")
@@ -428,16 +454,55 @@ def get_recommendations():
 @login_required
 def refresh_recommendations():
     """
-    Manually trigger recommendation refresh in background.
-    Returns immediately — client should poll /recommendations.
+    Force-regenerate today's recommendations in background.
+    Pass JSON {"broadcast": true} to also SMS all users when done.
+    Client should poll GET /recommendations every 5 seconds until generating=false.
     """
-    global _reco_generating
+    global _reco_generating, _reco_last_error, _reco_started_at
     if _reco_generating:
-        return jsonify({"message": "Already generating. Please wait ~30 seconds.", "generating": True})
-    _reco_generating = True
-    t = _threading.Thread(target=_generate_and_save_bg, daemon=True)
+        return jsonify({
+            "message":    "Already generating — please wait ~30 seconds.",
+            "generating": True,
+        })
+
+    data      = request.get_json(silent=True) or {}
+    broadcast = bool(data.get("broadcast", False))
+
+    _reco_generating  = True
+    _reco_last_error  = None
+    _reco_started_at  = _dt.datetime.utcnow()
+    t = _threading.Thread(
+        target=_generate_and_save_bg,
+        kwargs={"broadcast_sms": broadcast},
+        daemon=True,
+    )
     t.start()
-    return jsonify({"message": "Refresh started. Poll /recommendations in ~30 seconds.", "generating": True})
+
+    return jsonify({
+        "message":    "Refresh started. Poll GET /recommendations every 5s.",
+        "generating": True,
+        "broadcast":  broadcast,
+    })
+
+
+@app.route("/recommendations/broadcast", methods=["POST"])
+@login_required
+def broadcast_recommendations():
+    """
+    Send today's already-generated picks via SMS to all registered users.
+    Does NOT regenerate — uses whatever is in DB for today.
+    """
+    try:
+        from recommender import get_todays_recommendations
+        from scheduler   import _broadcast_recommendations
+        recs = get_todays_recommendations()
+        if not recs:
+            return jsonify({"error": "No recommendations for today yet. Generate them first."}), 400
+        _broadcast_recommendations(recs)
+        return jsonify({"message": f"SMS broadcast triggered for {len(recs)} picks."})
+    except Exception as e:
+        print(f"[Broadcast] Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 # ══════════════════════════════════════════════════════════════════
