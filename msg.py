@@ -5,31 +5,58 @@ import yfinance as yf
 from twilio.rest import Client
 
 # ── Twilio credentials ──────────────────────────────────────────────────────
-account_sid           = os.getenv("TWILIO_ACCOUNT_SID")
-auth_token            = os.getenv("TWILIO_AUTH_TOKEN")
-twilio_sms_number     = os.getenv("TWILIO_SMS_NUMBER")
-twilio_whatsapp_number= os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
-NEWS_API_KEY          = os.getenv("NEWS_API_KEY", "451415d68a1b4f3e8a055047d2509f38")
+account_sid            = os.getenv("TWILIO_ACCOUNT_SID")
+auth_token             = os.getenv("TWILIO_AUTH_TOKEN")
+twilio_sms_number      = os.getenv("TWILIO_SMS_NUMBER")
+twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+NEWS_API_KEY           = os.getenv("NEWS_API_KEY", "")
+TWELVE_DATA_KEY        = os.getenv("TWELVE_DATA_KEY", "")
 
 client = Client(account_sid, auth_token)
 
 
-# ── Price fetching via yfinance (unlimited, no API key needed) ──────────────
+# ── Price fetching ──────────────────────────────────────────────────────────
+
+def _to_td_symbol(symbol: str) -> str:
+    if symbol.endswith(".NS"): return symbol.replace(".NS", "") + ":NSE"
+    if symbol.endswith(".BO"): return symbol.replace(".BO", "") + ":BSE"
+    return symbol
+
+def _fetch_twelvedata(symbol: str):
+    if not TWELVE_DATA_KEY:
+        return None
+    try:
+        td_sym = _to_td_symbol(symbol)
+        url    = f"https://api.twelvedata.com/price?symbol={td_sym}&apikey={TWELVE_DATA_KEY}"
+        resp   = requests.get(url, timeout=8)
+        data   = resp.json()
+        if "price" in data:
+            price = float(data["price"])
+            print(f"[TwelveData] {symbol} = {price}")
+            return price
+        print(f"[TwelveData] No price for {symbol}: {data.get('message','unknown error')}")
+    except Exception as e:
+        print(f"[TwelveData] Error for {symbol}: {e}")
+    return None
 
 def fetch_current_price(symbol: str):
     """
-    Fetch latest closing price using yfinance.
-    Works for Indian stocks (RELIANCE.NS) and US stocks (AAPL).
+    Fetch latest price — tries Twelve Data first, falls back to yfinance.
     Returns (price, symbol) or (None, None) on failure.
     """
     import time
-    for attempt in range(3):
+    price = _fetch_twelvedata(symbol)
+    if price and price > 0:
+        return price, symbol
+
+    print(f"[Price] Twelve Data failed for {symbol}, trying yfinance...")
+    for attempt in range(2):
         try:
             ticker = yf.Ticker(symbol)
             try:
-                price = ticker.fast_info.last_price
-                if price and price > 0:
-                    return float(price), symbol
+                p = ticker.fast_info.last_price
+                if p and p > 0:
+                    return float(p), symbol
             except Exception:
                 pass
             hist = ticker.history(period="2d")
@@ -37,9 +64,8 @@ def fetch_current_price(symbol: str):
                 return float(hist["Close"].iloc[-1]), symbol
         except Exception as e:
             print(f"[yfinance] Attempt {attempt+1} failed for {symbol}: {e}")
-            if attempt < 2:
+            if attempt < 1:
                 time.sleep(2)
-    print(f"[yfinance] All attempts failed for {symbol}")
     return None, None
 
 
@@ -83,11 +109,6 @@ def send_alert_whatsapp(to_number: str, message: str) -> bool:
 
 def send_stock_news_alert(stock_symbol: str, company_name: str,
                           phone_number: str, threshold_percent: int = 1) -> bool:
-    """
-    Checks 2-day price change using yfinance.
-    Sends SMS + WhatsApp news alert if change >= threshold.
-    Works for both Indian (.NS) and US stocks.
-    """
     try:
         ticker = yf.Ticker(stock_symbol)
         hist   = ticker.history(period="5d")
@@ -102,25 +123,26 @@ def send_stock_news_alert(stock_symbol: str, company_name: str,
         diff_pct   = round((diff / day_before) * 100, 2)
         up_down    = "🔺" if diff > 0 else "🔻"
 
-        # Clean symbol for display (remove .NS .BO suffix)
         display_sym = stock_symbol.replace(".NS", "").replace(".BO", "")
-
         print(f"[Alert] {display_sym}: {up_down}{diff_pct}% change")
 
         if abs(diff_pct) < threshold_percent:
             print(f"Below threshold ({threshold_percent}%). No alert sent.")
             return False
 
-        # Fetch news
-        news_resp = requests.get(
-            "https://newsapi.org/v2/everything",
-            params={"apiKey": NEWS_API_KEY, "qInTitle": company_name, "pageSize": 3},
-            timeout=10
-        )
-        articles = news_resp.json().get("articles", [])
+        articles = []
+        if NEWS_API_KEY:
+            try:
+                news_resp = requests.get(
+                    "https://newsapi.org/v2/everything",
+                    params={"apiKey": NEWS_API_KEY, "qInTitle": company_name, "pageSize": 3},
+                    timeout=10
+                )
+                articles = news_resp.json().get("articles", [])
+            except Exception as e:
+                print(f"[NewsAPI] Error: {e}")
 
         if not articles:
-            # Send price alert even without news
             msg = (f"📊 StockWise Alert\n"
                    f"{display_sym} ({company_name})\n"
                    f"{up_down} {diff_pct}% price change\n"
