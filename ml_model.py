@@ -1,20 +1,13 @@
 """
-ml_model.py — LSTM forecast using yfinance (no API limits)
-  • Works for Indian stocks (RELIANCE.NS) and US stocks
-  • Disk-cached models — retrain once a week
-  • Background training for fast first response
-  • Prices in local currency (INR for Indian stocks)
-
-Render notes:
-  • Free tier: MODEL_CACHE_DIR defaults to /tmp/model_cache (wiped on redeploy)
-  • Paid tier with Disk: set MODEL_CACHE_DIR=/data/model_cache in env vars
+ml_model.py — LSTM price forecast
+Data: Twelve Data → Stooq (zero yfinance — blocked on cloud IPs)
+Caching: models saved to MODEL_CACHE_DIR, retrained weekly in background
 """
 import os, io, base64, warnings, threading
 from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -25,27 +18,25 @@ from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 
+from data_fetch import fetch_history, fetch_price
+
 warnings.filterwarnings("ignore")
 
-# ── Config ──────────────────────────────────────────────────────────────────
-# Default to /tmp/model_cache so it always works on Render free tier
-# Set MODEL_CACHE_DIR=/data/model_cache in Render env vars if you have a Disk
+# ── Config ────────────────────────────────────────────────────────────────────
 MODEL_CACHE_DIR   = os.getenv("MODEL_CACHE_DIR", "/tmp/model_cache")
 MODEL_EXPIRY_DAYS = int(os.getenv("MODEL_EXPIRY_DAYS", "7"))
 LOOKBACK          = 60
 
 os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
 
-_training_lock     = threading.Lock()
+_training_lock      = threading.Lock()
 _currently_training: set = set()
 
-TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_KEY", "")
 
-
-# ── Cache helpers ────────────────────────────────────────────────────────────
+# ── Cache helpers ─────────────────────────────────────────────────────────────
 
 def _paths(symbol: str) -> dict:
-    safe = symbol.replace(".", "_").upper()
+    safe = symbol.replace(".", "_").replace("&", "n").upper()
     base = os.path.join(MODEL_CACHE_DIR, safe)
     return {
         "model":  base + "_model.keras",
@@ -80,68 +71,25 @@ def _load(symbol: str):
     return model, scaler
 
 
-# ── Data fetching ────────────────────────────────────────────────────────────
-
-def _to_td_symbol(symbol: str) -> str:
-    if symbol.endswith(".NS"): return symbol.replace(".NS", "") + ":NSE"
-    if symbol.endswith(".BO"): return symbol.replace(".BO", "") + ":BSE"
-    return symbol
-
-def _fetch_twelvedata_history(symbol: str) -> pd.DataFrame | None:
-    if not TWELVE_DATA_KEY:
-        return None
-    try:
-        import requests as _req
-        td_sym = _to_td_symbol(symbol)
-        url    = (
-            f"https://api.twelvedata.com/time_series"
-            f"?symbol={td_sym}&interval=1day&outputsize=1260"
-            f"&apikey={TWELVE_DATA_KEY}&format=JSON"
-        )
-        resp = _req.get(url, timeout=15)
-        data = resp.json()
-        if data.get("status") == "error":
-            print(f"[TwelveData] {symbol}: {data.get('message')}")
-            return None
-        rows = data.get("values", [])
-        if not rows:
-            return None
-        df = pd.DataFrame(rows)
-        df["ds"] = pd.to_datetime(df["datetime"])
-        df["y"]  = df["close"].astype(float)
-        df = df[["ds", "y"]].sort_values("ds").reset_index(drop=True)
-        print(f"[TwelveData] {symbol}: {len(df)} rows fetched")
-        return df
-    except Exception as e:
-        print(f"[TwelveData] History error for {symbol}: {e}")
-        return None
-
+# ── Data fetch (uses data_fetch.py — no yfinance) ────────────────────────────
 
 def fetch_stock_data(symbol: str) -> pd.DataFrame | None:
-    import time
-    df = _fetch_twelvedata_history(symbol)
-    if df is not None and not df.empty:
-        return df
-
-    print(f"[Stock] Twelve Data failed for {symbol}, trying yfinance...")
-    for attempt in range(3):
-        try:
-            ticker = yf.Ticker(symbol)
-            df     = ticker.history(period="5y")
-            if df.empty:
-                if attempt < 2: time.sleep(2)
-                continue
-            df = df.reset_index()
-            df.rename(columns={"Date": "ds", "Close": "y"}, inplace=True)
-            df["ds"] = pd.to_datetime(df["ds"]).dt.tz_localize(None)
-            return df[["ds", "y"]].sort_values("ds").reset_index(drop=True)
-        except Exception as e:
-            print(f"[yfinance] Error {symbol} attempt {attempt+1}: {e}")
-            if attempt < 2: time.sleep(2)
-    return None
+    """
+    Fetch 5 years of daily closing prices.
+    Returns DataFrame with columns ds (datetime) and y (close price).
+    """
+    df = fetch_history(symbol, days=1825)   # ~5 years
+    if df is None or df.empty:
+        return None
+    # Ensure ds/y columns
+    if "ds" not in df.columns:
+        df = df.reset_index()
+        df.rename(columns={"Date": "ds", "Close": "y"}, inplace=True)
+    df["ds"] = pd.to_datetime(df["ds"]).dt.tz_localize(None)
+    return df[["ds", "y"]].sort_values("ds").reset_index(drop=True)
 
 
-# ── LSTM helpers ─────────────────────────────────────────────────────────────
+# ── LSTM helpers ──────────────────────────────────────────────────────────────
 
 def _build_sequences(scaled: np.ndarray):
     X, y = [], []
@@ -163,7 +111,7 @@ def _build_model() -> Sequential:
     return m
 
 
-# ── Training ──────────────────────────────────────────────────────────────────
+# ── Training ───────────────────────────────────────────────────────────────────
 
 def _train_and_save(symbol: str, df: pd.DataFrame):
     prices = df["y"].values.reshape(-1, 1)
@@ -177,7 +125,7 @@ def _train_and_save(symbol: str, df: pd.DataFrame):
         X[:split], y[:split],
         validation_data=(X[split:], y[split:]),
         epochs=80, batch_size=32,
-        callbacks=[es], verbose=0
+        callbacks=[es], verbose=0,
     )
     _save(symbol, model, scaler)
     with _training_lock:
@@ -193,7 +141,7 @@ def _spawn_training(symbol: str, df: pd.DataFrame):
     print(f"[BG] Training started for {symbol}")
 
 
-# ── Get or train ──────────────────────────────────────────────────────────────
+# ── Get or train ───────────────────────────────────────────────────────────────
 
 def get_or_train_model(symbol: str, df: pd.DataFrame):
     prices = df["y"].values.reshape(-1, 1)
@@ -214,7 +162,7 @@ def get_or_train_model(symbol: str, df: pd.DataFrame):
     return model, scaler, scaled[-LOOKBACK:, 0]
 
 
-# ── Forecast helpers ──────────────────────────────────────────────────────────
+# ── Forecast helpers ───────────────────────────────────────────────────────────
 
 def _forecast_days(model, last_window: np.ndarray, n_days: int, scaler) -> np.ndarray:
     win   = last_window.copy().reshape(1, LOOKBACK, 1)
@@ -231,16 +179,11 @@ def _ci(preds: np.ndarray, z: float = 1.65):
     delta = z * sigma * np.sqrt(np.arange(1, len(preds) + 1))
     return preds - delta, preds + delta
 
-
-# ── Currency label ────────────────────────────────────────────────────────────
-
 def _currency(symbol: str) -> str:
-    if symbol.endswith(".NS") or symbol.endswith(".BO"):
-        return "₹"
-    return "$"
+    return "₹" if (symbol.endswith(".NS") or symbol.endswith(".BO")) else "$"
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# ── Public API ─────────────────────────────────────────────────────────────────
 
 def get_aggregated_forecast(symbol: str, forecast_type: str = "6m") -> pd.DataFrame | None:
     df = fetch_stock_data(symbol)
