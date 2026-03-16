@@ -202,37 +202,104 @@ def _currency(symbol: str) -> str:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def get_aggregated_forecast(symbol: str, forecast_type: str = "6m") -> pd.DataFrame | None:
-    df = fetch_stock_data(symbol)
-    if df is None or df.empty:
-        return None
-
-    model, scaler, last_win = get_or_train_model(symbol, df)
+def _fast_forecast(df: pd.DataFrame, forecast_type: str) -> pd.DataFrame:
+    """
+    Fast statistical fallback forecast using linear trend + volatility bands.
+    Runs in milliseconds. Used when LSTM model is not ready yet.
+    """
+    closes    = df["y"].values
     last_date = df["ds"].max()
+    last_price = closes[-1]
+
+    # Fit linear trend on last 60 days
+    lookback = min(60, len(closes))
+    x = np.arange(lookback)
+    y = closes[-lookback:]
+    slope, intercept = np.polyfit(x, y, 1)
+    vol = np.std(np.diff(y) / y[:-1]) * last_price  # daily vol in price units
 
     if forecast_type == "6m":
-        n      = 180
-        preds  = _forecast_days(model, last_win, n, scaler)
-        dates  = pd.bdate_range(start=last_date + timedelta(days=1), periods=n)[:n]
-        lo, hi = _ci(preds)
-        tmp    = pd.DataFrame({"ds": dates, "yhat": preds, "yhat_lower": lo, "yhat_upper": hi})
-        tmp["period"] = tmp["ds"].dt.to_period("M")
-        agg    = tmp.groupby("period")[["yhat","yhat_lower","yhat_upper"]].mean().reset_index()
-        agg["ds"] = agg["period"].dt.to_timestamp()
-        return agg[["ds","yhat","yhat_lower","yhat_upper"]].head(6)
+        months = 6
+        periods = []
+        for m in range(1, months + 1):
+            days_ahead = m * 21  # ~21 trading days per month
+            pred = last_price + slope * days_ahead
+            sigma = vol * np.sqrt(days_ahead) * 1.65
+            dt = last_date + timedelta(days=m * 30)
+            periods.append({"ds": dt, "yhat": round(pred, 2),
+                           "yhat_lower": round(pred - sigma, 2),
+                           "yhat_upper": round(pred + sigma, 2)})
+        return pd.DataFrame(periods)
+    else:
+        years = 5
+        periods = []
+        for yr in range(1, years + 1):
+            days_ahead = yr * 252
+            pred = last_price + slope * days_ahead
+            sigma = vol * np.sqrt(days_ahead) * 1.65
+            dt = pd.Timestamp(str(last_date.year + yr) + "-01-01")
+            periods.append({"ds": dt, "yhat": round(pred, 2),
+                           "yhat_lower": round(pred - sigma, 2),
+                           "yhat_upper": round(pred + sigma, 2)})
+        return pd.DataFrame(periods)
 
-    elif forecast_type == "5y":
-        n      = 365 * 5 + 30
-        preds  = _forecast_days(model, last_win, n, scaler)
-        dates  = pd.bdate_range(start=last_date + timedelta(days=1), periods=n)[:n]
-        lo, hi = _ci(preds)
-        tmp    = pd.DataFrame({"ds": dates, "yhat": preds, "yhat_lower": lo, "yhat_upper": hi})
-        tmp["year"] = tmp["ds"].dt.year
-        agg    = tmp.groupby("year")[["yhat","yhat_lower","yhat_upper"]].mean().reset_index()
-        agg["ds"] = pd.to_datetime(agg["year"].astype(str) + "-01-01")
-        return agg[["ds","yhat","yhat_lower","yhat_upper"]].head(5)
 
-    return None
+def get_aggregated_forecast(symbol: str, forecast_type: str = "6m") -> pd.DataFrame | None:
+    print(f"[Forecast] Starting {forecast_type} forecast for {symbol}")
+
+    df = fetch_stock_data(symbol)
+    if df is None or df.empty:
+        print(f"[Forecast] No data returned for {symbol}")
+        return None
+    print(f"[Forecast] Got {len(df)} rows of history for {symbol}")
+
+    last_date = df["ds"].max()
+
+    # Try LSTM first
+    try:
+        model, scaler, last_win = get_or_train_model(symbol, df)
+        print(f"[Forecast] LSTM model ready for {symbol}, running inference...")
+
+        if forecast_type == "6m":
+            n      = 180
+            preds  = _forecast_days(model, last_win, n, scaler)
+            dates  = pd.bdate_range(start=last_date + timedelta(days=1), periods=n)[:n]
+            lo, hi = _ci(preds)
+            tmp    = pd.DataFrame({"ds": dates, "yhat": preds, "yhat_lower": lo, "yhat_upper": hi})
+            tmp["period"] = tmp["ds"].dt.to_period("M")
+            agg    = tmp.groupby("period")[["yhat","yhat_lower","yhat_upper"]].mean().reset_index()
+            agg["ds"] = agg["period"].dt.to_timestamp()
+            result = agg[["ds","yhat","yhat_lower","yhat_upper"]].head(6)
+
+        elif forecast_type == "5y":
+            n      = 365 * 5 + 30
+            preds  = _forecast_days(model, last_win, n, scaler)
+            dates  = pd.bdate_range(start=last_date + timedelta(days=1), periods=n)[:n]
+            lo, hi = _ci(preds)
+            tmp    = pd.DataFrame({"ds": dates, "yhat": preds, "yhat_lower": lo, "yhat_upper": hi})
+            tmp["year"] = tmp["ds"].dt.year
+            agg    = tmp.groupby("year")[["yhat","yhat_lower","yhat_upper"]].mean().reset_index()
+            agg["ds"] = pd.to_datetime(agg["year"].astype(str) + "-01-01")
+            result = agg[["ds","yhat","yhat_lower","yhat_upper"]].head(5)
+        else:
+            return None
+
+        print(f"[Forecast] LSTM done for {symbol}")
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"[Forecast] LSTM failed for {symbol}: {e} — using fast fallback")
+
+    # Fast statistical fallback — always works
+    try:
+        result = _fast_forecast(df, forecast_type)
+        print(f"[Forecast] Fast fallback done for {symbol} ({len(result)} points)")
+        return result
+    except Exception as e2:
+        print(f"[Forecast] Fast fallback also failed for {symbol}: {e2}")
+        return None
 
 
 def generate_stock_plot(symbol: str, forecast_type: str = "6m") -> str | None:
@@ -263,3 +330,4 @@ def generate_stock_plot(symbol: str, forecast_type: str = "6m") -> str | None:
     plt.close(fig)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode()
+    
