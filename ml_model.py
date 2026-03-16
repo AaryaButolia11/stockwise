@@ -4,6 +4,10 @@ ml_model.py — LSTM forecast using yfinance (no API limits)
   • Disk-cached models — retrain once a week
   • Background training for fast first response
   • Prices in local currency (INR for Indian stocks)
+
+Render notes:
+  • Free tier: MODEL_CACHE_DIR defaults to /tmp/model_cache (wiped on redeploy)
+  • Paid tier with Disk: set MODEL_CACHE_DIR=/data/model_cache in env vars
 """
 import os, io, base64, warnings, threading
 from datetime import datetime, timedelta
@@ -24,7 +28,9 @@ from tensorflow.keras.callbacks import EarlyStopping
 warnings.filterwarnings("ignore")
 
 # ── Config ──────────────────────────────────────────────────────────────────
-MODEL_CACHE_DIR   = os.getenv("MODEL_CACHE_DIR", "model_cache")
+# Default to /tmp/model_cache so it always works on Render free tier
+# Set MODEL_CACHE_DIR=/data/model_cache in Render env vars if you have a Disk
+MODEL_CACHE_DIR   = os.getenv("MODEL_CACHE_DIR", "/tmp/model_cache")
 MODEL_EXPIRY_DAYS = int(os.getenv("MODEL_EXPIRY_DAYS", "7"))
 LOOKBACK          = 60
 
@@ -32,6 +38,8 @@ os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
 
 _training_lock     = threading.Lock()
 _currently_training: set = set()
+
+TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_KEY", "")
 
 
 # ── Cache helpers ────────────────────────────────────────────────────────────
@@ -72,32 +80,64 @@ def _load(symbol: str):
     return model, scaler
 
 
-# ── Data fetching via yfinance ───────────────────────────────────────────────
+# ── Data fetching ────────────────────────────────────────────────────────────
+
+def _to_td_symbol(symbol: str) -> str:
+    if symbol.endswith(".NS"): return symbol.replace(".NS", "") + ":NSE"
+    if symbol.endswith(".BO"): return symbol.replace(".BO", "") + ":BSE"
+    return symbol
+
+def _fetch_twelvedata_history(symbol: str) -> pd.DataFrame | None:
+    if not TWELVE_DATA_KEY:
+        return None
+    try:
+        import requests as _req
+        td_sym = _to_td_symbol(symbol)
+        url    = (
+            f"https://api.twelvedata.com/time_series"
+            f"?symbol={td_sym}&interval=1day&outputsize=1260"
+            f"&apikey={TWELVE_DATA_KEY}&format=JSON"
+        )
+        resp = _req.get(url, timeout=15)
+        data = resp.json()
+        if data.get("status") == "error":
+            print(f"[TwelveData] {symbol}: {data.get('message')}")
+            return None
+        rows = data.get("values", [])
+        if not rows:
+            return None
+        df = pd.DataFrame(rows)
+        df["ds"] = pd.to_datetime(df["datetime"])
+        df["y"]  = df["close"].astype(float)
+        df = df[["ds", "y"]].sort_values("ds").reset_index(drop=True)
+        print(f"[TwelveData] {symbol}: {len(df)} rows fetched")
+        return df
+    except Exception as e:
+        print(f"[TwelveData] History error for {symbol}: {e}")
+        return None
+
 
 def fetch_stock_data(symbol: str) -> pd.DataFrame | None:
-    """
-    Fetch 5 years of daily closing prices using yfinance.
-    Works for Indian stocks (RELIANCE.NS) and US stocks (AAPL).
-    """
     import time
+    df = _fetch_twelvedata_history(symbol)
+    if df is not None and not df.empty:
+        return df
+
+    print(f"[Stock] Twelve Data failed for {symbol}, trying yfinance...")
     for attempt in range(3):
         try:
             ticker = yf.Ticker(symbol)
             df     = ticker.history(period="5y")
             if df.empty:
-                print(f"[yfinance] No data for {symbol} (attempt {attempt+1})")
-                if attempt < 2:
-                    time.sleep(2)
-                    continue
-                return None
+                if attempt < 2: time.sleep(2)
+                continue
             df = df.reset_index()
             df.rename(columns={"Date": "ds", "Close": "y"}, inplace=True)
             df["ds"] = pd.to_datetime(df["ds"]).dt.tz_localize(None)
             return df[["ds", "y"]].sort_values("ds").reset_index(drop=True)
         except Exception as e:
-            print(f"[yfinance] Error fetching {symbol} (attempt {attempt+1}): {e}")
-            if attempt < 2:
-                time.sleep(2)
+            print(f"[yfinance] Error {symbol} attempt {attempt+1}: {e}")
+            if attempt < 2: time.sleep(2)
     return None
 
 
