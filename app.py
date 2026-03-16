@@ -188,7 +188,7 @@ def get_forecast():
     try:
         fdf = get_aggregated_forecast(symbol, forecast_type)
         if fdf is None or fdf.empty:
-            return jsonify({"error": "Could not generate forecast."}), 500
+            return jsonify({"error": "Could not generate forecast. Check Render logs for details."}), 500
         if not pd.api.types.is_datetime64_any_dtype(fdf["ds"]):
             fdf["ds"] = pd.to_datetime(fdf["ds"])
         plot     = generate_stock_plot(symbol, forecast_type)
@@ -202,8 +202,10 @@ def get_forecast():
             "currency":   currency,
         })
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"[Forecast] {symbol}: {e}")
-        return jsonify({"error": "Forecast failed. Please try again."}), 500
+        return jsonify({"error": f"Forecast failed: {str(e)[:120]}"}), 500
 
 
 # ══════════════════════════════════════════════════════════════════
