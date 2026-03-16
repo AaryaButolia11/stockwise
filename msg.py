@@ -8,6 +8,7 @@ import os
 import requests
 import yfinance as yf
 from twilio.rest import Client
+from data_fetch import fetch_price as _df_fetch_price
 
 # ── Twilio — read at import time is fine, these don't change ────────────────
 account_sid            = os.getenv("TWILIO_ACCOUNT_SID")
@@ -132,27 +133,10 @@ def _fetch_yfinance(symbol: str) -> float | None:
 
 def fetch_current_price(symbol: str) -> tuple:
     """
-    Fetch latest price trying all sources in order.
+    Fetch latest price using data_fetch (Twelve Data → NSE → Stooq).
     Returns (price, symbol) or (None, None) on failure.
     """
-    # 1. Twelve Data
-    price = _fetch_twelvedata(symbol)
-    if price:
-        return price, symbol
-
-    # 2. NSE India (Indian stocks only, no key needed)
-    price = _fetch_nse(symbol)
-    if price:
-        return price, symbol
-
-    # 3. yfinance fallback
-    print(f"[Price] Trying yfinance for {symbol}...")
-    price = _fetch_yfinance(symbol)
-    if price:
-        return price, symbol
-
-    print(f"[Price] All sources failed for {symbol}")
-    return None, None
+    return _df_fetch_price(symbol)
 
 
 # ── SMS ──────────────────────────────────────────────────────────────────────
