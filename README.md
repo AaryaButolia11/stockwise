@@ -51,7 +51,7 @@ Whether you're a student learning about markets, a developer exploring ML in fin
 
 ## Why LSTM for Stock Forecasting?
 
-<img width="552" height="285" alt="image" src="https://github.com/user-attachments/assets/55795587-75be-442e-9bca-d792680c2c19" />
+<img width="674" height="345" alt="image" src="https://github.com/user-attachments/assets/8db83131-cffd-42c8-94b4-4d3bf3b267c1" />
 
 Stock prices are **sequential time-series data** — the price today is influenced by what happened yesterday, last week, and last month. This is exactly the kind of problem where LSTMs (Long Short-Term Memory networks) outperform traditional approaches.
 
