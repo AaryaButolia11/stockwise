@@ -133,6 +133,8 @@ Every weekday at 9:15 AM IST, the background scheduler automatically regenerates
 ## Program Flow
 
 Here is the complete end-to-end flow of how StockWise works:
+<img width="1128" height="787" alt="image" src="https://github.com/user-attachments/assets/0b618f6a-ef54-47a3-9317-4f89a283c5f9" />
+
 
 ```
 User opens browser
