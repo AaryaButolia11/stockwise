@@ -324,32 +324,6 @@ python app.py
 
 ---
 
-## Deploy to Fly.io
-
-```bash
-# 1. Install flyctl and login
-curl -L https://fly.io/install.sh | sh
-fly auth login
-
-# 2. Create app + persistent volume for model cache
-fly launch --name stockwise-app --region bom   # bom = Mumbai
-fly volumes create stockwise_data --size 3 --region bom
-
-# 3. Set secrets
-fly secrets set FLASK_SECRET_KEY="your_long_random_key"
-fly secrets set DATABASE_URL="postgresql://..."
-fly secrets set TWILIO_ACCOUNT_SID="ACxxx"
-fly secrets set TWILIO_AUTH_TOKEN="xxx"
-fly secrets set TWILIO_SMS_NUMBER="+1xxx"
-fly secrets set TWELVE_DATA_KEY="xxx"    # optional
-fly secrets set NEWS_API_KEY="xxx"       # optional
-
-# 4. Deploy
-fly deploy
-
-# 5. Monitor logs
-fly logs
-```
 
 ---
 
