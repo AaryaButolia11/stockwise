@@ -26,10 +26,15 @@
 
 ## Dashboard
 <img width="1918" height="1033" alt="image" src="https://github.com/user-attachments/assets/3c53dd4a-7157-4ef9-ae5a-76d602a4f6e5" />
+
+## Price Predicition
 <img width="1917" height="1031" alt="image" src="https://github.com/user-attachments/assets/1c59739b-76cd-4a35-8fc8-dfcd81d0b945" />
 
-<img width="1897" height="1030" alt="image" src="https://github.com/user-attachments/assets/f8c104a4-a95c-478b-9f11-e6fce791cb9e" />
+## Buying Stocks
 <img width="1917" height="1018" alt="image" src="https://github.com/user-attachments/assets/5e1547f6-fd18-4109-aa6d-41fabf977aff" />
+
+## SMS Confirmation
+<img width="1897" height="1030" alt="image" src="https://github.com/user-attachments/assets/f8c104a4-a95c-478b-9f11-e6fce791cb9e" />
 
 <img width="1917" height="1028" alt="image" src="https://github.com/user-attachments/assets/5ee6dc4b-5243-4698-a155-6cb69e684d5f" />
 <img width="1917" height="1028" alt="image" src="https://github.com/user-attachments/assets/03cf86d1-98b5-4fa4-8e0b-2da753b8f447" />
