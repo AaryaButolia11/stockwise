@@ -20,10 +20,11 @@
 # Screenshots
 ## Sign Up
 <img width="1918" height="1028" alt="image" src="https://github.com/user-attachments/assets/9e43b2e9-a77f-4014-a9fc-58433f0d42e3" />
+
 ## Login
 <img width="1918" height="1031" alt="image" src="https://github.com/user-attachments/assets/968ac026-06ab-4454-a333-30fbf018640b" />
 
-
+## Dashboard
 <img width="1918" height="1033" alt="image" src="https://github.com/user-attachments/assets/3c53dd4a-7157-4ef9-ae5a-76d602a4f6e5" />
 <img width="1917" height="1031" alt="image" src="https://github.com/user-attachments/assets/1c59739b-76cd-4a35-8fc8-dfcd81d0b945" />
 
