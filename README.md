@@ -88,45 +88,6 @@ python app.py
 
 ---
 
-## Deploy to Fly.io
-
-```bash
-# 1. Install flyctl
-curl -L https://fly.io/install.sh | sh
-
-# 2. Login and create app
-fly auth login
-fly launch --name stockwise-app --region bom
-
-# 3. Create persistent volume (for model cache)
-fly volumes create stockwise_data --size 3 --region bom
-
-# 4. Set secrets (one command per secret)
-fly secrets set FLASK_SECRET_KEY="your_long_random_key"
-fly secrets set DB_HOST="your_db_host"
-fly secrets set DB_USER="your_db_user"
-fly secrets set DB_PASSWORD="your_db_password"
-fly secrets set DB_NAME="stockwise_db"
-fly secrets set TWILIO_ACCOUNT_SID="ACxxx"
-fly secrets set TWILIO_AUTH_TOKEN="xxx"
-fly secrets set TWILIO_SMS_NUMBER="+1xxx"
-fly secrets set POLYGON_API_KEY="xxx"
-fly secrets set ALPHA_VANTAGE_API_KEY="xxx"
-fly secrets set NEWS_API_KEY="xxx"
-
-# 5. Deploy
-fly deploy
-
-# 6. Check logs
-fly logs
-```
-
-### Recommended free MySQL for Fly.io
-- **PlanetScale** (planetscale.com) — free tier, MySQL-compatible
-- Or **Fly MySQL** addon: `fly postgres create`
-
----
-
 ## How the LSTM caching works
 
 ```
