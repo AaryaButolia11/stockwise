@@ -40,6 +40,7 @@
  
 <img width="1897" height="1030" alt="image" src="https://github.com/user-attachments/assets/f8c104a4-a95c-478b-9f11-e6fce791cb9e" />
 
+## AI Picks
 <img width="1917" height="1028" alt="image" src="https://github.com/user-attachments/assets/03cf86d1-98b5-4fa4-8e0b-2da753b8f447" />
 
 
