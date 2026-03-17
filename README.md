@@ -42,6 +42,10 @@ Whether you're a student learning about markets, a developer exploring ML in fin
 ### SMS Confirmation
 <img width="1917" height="1018" alt="image" src="https://github.com/user-attachments/assets/5e1547f6-fd18-4109-aa6d-41fabf977aff" />
 
+## Text Received 
+![WhatsApp Image 2026-03-18 at 12 29 38 AM](https://github.com/user-attachments/assets/968934cd-45ce-4895-9cb7-e49bc9ca876f)
+
+
 <img width="1897" height="1030" alt="image" src="https://github.com/user-attachments/assets/f8c104a4-a95c-478b-9f11-e6fce791cb9e" />
 
 ### AI Picks
