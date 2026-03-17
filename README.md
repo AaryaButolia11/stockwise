@@ -106,6 +106,30 @@ This cache-then-retrain pattern means **no user ever waits for training** after 
 
 ---
 
+## How AI Picks Working
+**What happens when you open the AI Picks page:**
+
+The page hits `/recommendations`. The backend first checks the database — if today's picks are already saved (generated at 9:15 AM by the scheduler), it returns them instantly. If not, it starts generating in the background and tells the UI "still generating, check back in 30 seconds."
+
+**How each stock gets scored:**
+
+Every Nifty 50 stock gets fetched (60 days of history via yfinance) and run through 5 signals:
+
+- **Momentum** — how much the stock moved over the last 5, 10, and 20 days
+- **Volatility** — lower volatility scores higher (stable stocks are preferred)
+- **Volume** — if today's volume is higher than the recent average, it signals interest
+- **Gap** — did the stock open higher than yesterday's close (gap-up is bullish)
+
+These are combined into a total score (momentum weighted heaviest at 40%), and a `predicted_gain` percentage is calculated from short and long trend slopes.
+
+**How the top 5 are picked:**
+
+All stocks with a positive predicted gain are ranked by a combined formula of score + potential gain. The top 5 get saved to the `ai_recommendations` table in the database with the date, so the same picks are served to every user that day without recalculating.
+
+**The daily schedule:**
+
+Every weekday at 9:15 AM IST, the background scheduler automatically regenerates the picks fresh from that morning's opening prices — so by the time users check in the morning, the recommendations are already waiting.
+
 ## Program Flow
 
 Here is the complete end-to-end flow of how StockWise works:
