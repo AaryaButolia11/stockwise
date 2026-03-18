@@ -36,6 +36,7 @@ Whether you're a student learning about markets, a developer exploring ML in fin
 ### Price Prediction
 <img width="1917" height="1031" alt="image" src="https://github.com/user-attachments/assets/1c59739b-76cd-4a35-8fc8-dfcd81d0b945" />
 <img width="1583" height="1001" alt="image" src="https://github.com/user-attachments/assets/550472d2-8511-404a-b7c2-6c4c8dacedd1" />
+<img width="1587" height="970" alt="image" src="https://github.com/user-attachments/assets/a4db0988-4e8b-4e12-94c1-9ae9c87bcaba" />
 
 
 ### Buying Stocks
